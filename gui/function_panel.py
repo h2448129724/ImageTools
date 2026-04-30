@@ -1,56 +1,11 @@
-"""Function selection panel with search and categorized tree."""
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
-                                QLabel, QLineEdit, QHBoxLayout)
+"""Function selection panel with searchable tree view."""
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QLineEdit,
+                                QTreeWidget, QTreeWidgetItem)
 from PySide6.QtCore import Signal, Qt
 
-
-FUNCTION_REGISTRY = {
-    "颜色转换": [
-        ("color_bgr2rgb", "BGR → RGB"), ("color_rgb2bgr", "RGB → BGR"),
-        ("color_bgr2hsv", "BGR → HSV"), ("color_hsv2bgr", "HSV → BGR"),
-        ("color_bgr2lab", "BGR → LAB"), ("color_lab2bgr", "LAB → BGR"),
-        ("color_bgr2gray", "BGR → 灰度"), ("color_gray2bgr", "灰度 → BGR"),
-        ("color_bgr2yuv", "BGR → YUV"), ("color_bgr2hls", "BGR → HLS"),
-        ("color_bgr2ycrcb", "BGR → YCrCb"),
-    ],
-    "基础处理": [
-        ("resize", "缩放"), ("crop", "裁剪"), ("center_crop", "中心裁剪"),
-        ("rotate", "旋转"), ("flip", "翻转"),
-        ("brightness_contrast", "亮度/对比度"), ("saturation", "饱和度调整"),
-        ("histogram_eq", "直方图均衡化"), ("threshold", "二值化/阈值"),
-        ("morphology", "形态学操作"), ("pad", "填充/边框"),
-        ("remove_alpha", "移除Alpha通道"), ("add_alpha", "添加Alpha通道"),
-        ("overlay", "图像叠加"), ("channel_extract", "通道提取"),
-    ],
-    "图像滤波": [
-        ("filter_blur", "均值模糊"), ("filter_gaussian", "高斯模糊"),
-        ("filter_median", "中值滤波"), ("filter_bilateral", "双边滤波"),
-        ("filter_sharpen", "锐化"),
-        ("edge_canny", "Canny边缘检测"), ("edge_sobel", "Sobel边缘检测"),
-        ("edge_laplacian", "Laplacian边缘检测"),
-    ],
-    "大图切块": [
-        ("tile_fixed", "固定尺寸切块"), ("tile_grid", "网格切块"),
-        ("seg_tile", "分割标注切块(图+标签)"),
-    ],
-    "数据集处理": [
-        ("dataset_random_split", "随机划分"), ("dataset_stratified_split", "分层划分"),
-        ("dataset_kfold", "K折交叉验证"),
-        ("format_yolo2coco", "YOLO → COCO"), ("format_coco2yolo", "COCO → YOLO"),
-        ("format_voc2yolo", "VOC → YOLO"), ("format_voc2coco", "VOC → COCO"),
-        ("format_coco2voc", "COCO → VOC"), ("format_classification", "生成分类数据集"),
-    ],
-    "标注工具": [
-        ("annot_draw_yolo", "YOLO标注可视化"), ("annot_draw_coco", "COCO标注可视化"),
-        ("annot_validate_yolo", "YOLO标注校验"), ("annot_statistics", "标注统计"),
-        ("annot_crop_roi", "标注ROI裁剪"),
-    ],
-    "批量处理": [
-        ("batch_rename", "批量重命名"), ("batch_resize", "批量缩放"),
-        ("batch_roi_crop", "批量ROI裁剪"), ("batch_convert_format", "批量格式转换"),
-        ("batch_add_border", "批量添加边框"), ("batch_deduplicate", "图片去重"),
-    ],
-}
+from core.function_registry import (
+    get_categories, get_functions_by_category, get_all_functions_flat,
+)
 
 
 class FunctionPanel(QWidget):
@@ -58,7 +13,7 @@ class FunctionPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._all_items = []
+        self._all_functions = get_all_functions_flat()  # (key, name, cat_name)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -67,7 +22,9 @@ class FunctionPanel(QWidget):
         layout.setSpacing(4)
 
         title = QLabel("功能选择")
-        f = title.font(); f.setBold(True); title.setFont(f)
+        f = title.font()
+        f.setBold(True)
+        title.setFont(f)
         layout.addWidget(title)
 
         # Search box
@@ -78,58 +35,82 @@ class FunctionPanel(QWidget):
         self.search.textChanged.connect(self._on_search)
         layout.addWidget(self.search)
 
+        # Tree widget - no internal scrollbar, rely on parent layout
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
-        self.tree.setIndentation(16)
+        self.tree.setIndentation(12)
+        self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tree.setSizePolicy(QTreeWidget().sizePolicy().horizontalPolicy(),
+                                 QTreeWidget().sizePolicy().verticalPolicy())
         self.tree.itemClicked.connect(self._on_item_clicked)
-
-        for cat_name, functions in FUNCTION_REGISTRY.items():
-            cat = QTreeWidgetItem([cat_name])
-            cat.setFlags(cat.flags() & ~Qt.ItemIsSelectable)
-            cat.setData(0, Qt.UserRole, "__category__")
-            font = cat.font(0)
-            font.setBold(True)
-            cat.setFont(0, font)
-            for key, name in functions:
-                item = QTreeWidgetItem([name])
-                item.setData(0, Qt.UserRole, key)
-                item.setData(0, Qt.UserRole + 1, name)
-                cat.addChild(item)
-                self._all_items.append((item, name, cat_name))
-            self.tree.addTopLevelItem(cat)
-
-        self.tree.expandAll()
         layout.addWidget(self.tree)
 
-    def _on_search(self, text):
-        """Filter tree by search text while preserving category visibility."""
-        if not text.strip():
-            for i in range(self.tree.topLevelItemCount()):
-                cat = self.tree.topLevelItem(i)
-                cat.setHidden(False)
-                for j in range(cat.childCount()):
-                    cat.child(j).setHidden(False)
-            return
+        self._populate_tree()
 
-        low = text.lower()
+    def _populate_tree(self):
+        from PySide6.QtWidgets import QSizePolicy
+        self.tree.clear()
+        self._cat_items = {}
+        self._func_items = {}
+
+        for cat_name in get_categories():
+            cat_item = QTreeWidgetItem(self.tree, [cat_name])
+            cat_item.setData(0, Qt.UserRole, ("category", cat_name))
+            f = cat_item.font(0)
+            f.setBold(True)
+            cat_item.setFont(0, f)
+            self._cat_items[cat_name] = cat_item
+
+            for key, name in get_functions_by_category(cat_name):
+                func_item = QTreeWidgetItem(cat_item, [name])
+                func_item.setData(0, Qt.UserRole, ("function", key, name))
+                self._func_items[key] = func_item
+
+        # Expand only the first category by default; others collapsed
         for i in range(self.tree.topLevelItemCount()):
-            cat = self.tree.topLevelItem(i)
-            any_visible = False
-            for j in range(cat.childCount()):
-                child = cat.child(j)
-                name = child.text(0).lower()
-                visible = low in name
-                child.setHidden(not visible)
-                if visible:
-                    any_visible = True
-            cat.setHidden(not any_visible)
-            if any_visible and not cat.isExpanded():
-                cat.setExpanded(True)
+            item = self.tree.topLevelItem(i)
+            item.setExpanded(i == 0)
 
-    def _on_item_clicked(self, item, _):
-        key = item.data(0, Qt.UserRole)
-        if key == "__category__":
+    def _on_item_clicked(self, item):
+        data = item.data(0, Qt.UserRole)
+        if not data or data[0] != "function":
             return
-        name = item.data(0, Qt.UserRole + 1)
-        if key:
-            self.functionSelected.emit(key, name)
+        _, key, name = data
+        self.functionSelected.emit(key, name)
+
+    def _on_search(self, text):
+        low = text.lower().strip()
+        if not low:
+            # Show all, expand all
+            for i in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(i)
+                item.setHidden(False)
+                for j in range(item.childCount()):
+                    item.child(j).setHidden(False)
+            self.tree.expandAll()
+            return
+
+        # Filter: hide non-matching, expand categories with matches
+        for i in range(self.tree.topLevelItemCount()):
+            cat_item = self.tree.topLevelItem(i)
+            has_match = False
+            for j in range(cat_item.childCount()):
+                func_item = cat_item.child(j)
+                name = func_item.text(0).lower()
+                match = low in name
+                func_item.setHidden(not match)
+                if match:
+                    has_match = True
+            cat_item.setHidden(not has_match)
+            if has_match:
+                cat_item.setExpanded(True)
+
+    def select_function(self, key: str):
+        """Programmatically select a function by key."""
+        item = self._func_items.get(key)
+        if item:
+            self.tree.setCurrentItem(item)
+            self._on_item_clicked(item)
+            # Scroll to item
+            self.tree.scrollToItem(item)

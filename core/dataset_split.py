@@ -1,12 +1,16 @@
+"""Dataset splitting utilities: random, stratified, and K-fold."""
+from __future__ import annotations
+
 import os
 import random
 import shutil
-from collections import defaultdict
-from pathlib import Path
+from typing import Any
+
 from utils.helpers import ensure_dir, get_image_files
 
 
-def _copy_files(filelist, src_dir, dst_dir, label_dir=None):
+def _copy_files(filelist: list[str], src_dir: str, dst_dir: str,
+                label_dir: str | None = None) -> None:
     """Copy files from src to dst, optionally copying label files."""
     for src in filelist:
         rel = os.path.relpath(src, src_dir) if src_dir in src else os.path.basename(src)
@@ -20,20 +24,24 @@ def _copy_files(filelist, src_dir, dst_dir, label_dir=None):
                 shutil.copy2(lbl, lbl_dst)
 
 
-def _find_label_files(img_path, label_dir):
+def _find_label_files(img_path: str, label_dir: str) -> list[str]:
     """Find matching label files (.txt, .xml, .json) for an image."""
     base = os.path.splitext(os.path.basename(img_path))[0]
-    labels = []
+    labels: list[str] = []
     for ext in [".txt", ".xml", ".json"]:
-        # Look in the same relative location in label_dir
         lbl_path = os.path.join(label_dir, base + ext)
         if os.path.exists(lbl_path):
             labels.append(lbl_path)
     return labels
 
 
-def random_split(input_dir, output_dir, ratios=(0.7, 0.2, 0.1), label_dir=None, seed=42):
+def random_split(input_dir: str, output_dir: str,
+                 ratios: tuple[float, ...] = (0.7, 0.2, 0.1),
+                 label_dir: str | None = None,
+                 seed: int = 42) -> dict[str, list[str]]:
     """Randomly split images into train/val/test sets."""
+    if abs(sum(ratios[:3]) - 1.0) > 0.01:
+        raise ValueError(f"ratios 之和应为 1.0，当前为 {sum(ratios[:3]):.2f}")
     if len(ratios) == 2:
         ratios = (ratios[0], ratios[1], 0)
     files = get_image_files(input_dir)
@@ -42,7 +50,7 @@ def random_split(input_dir, output_dir, ratios=(0.7, 0.2, 0.1), label_dir=None, 
     n = len(files)
     train_end = max(1, int(n * ratios[0]))
     val_end = train_end + max(1, int(n * ratios[1]))
-    splits = {"train": files[:train_end], "val": files[train_end:val_end]}
+    splits: dict[str, list[str]] = {"train": files[:train_end], "val": files[train_end:val_end]}
     if ratios[2] > 0:
         splits["test"] = files[val_end:]
     for name, flist in splits.items():
@@ -51,12 +59,16 @@ def random_split(input_dir, output_dir, ratios=(0.7, 0.2, 0.1), label_dir=None, 
     return splits
 
 
-def stratified_split(input_dir, output_dir, ratios=(0.7, 0.2, 0.1), seed=42):
+def stratified_split(input_dir: str, output_dir: str,
+                     ratios: tuple[float, ...] = (0.7, 0.2, 0.1),
+                     seed: int = 42) -> dict[str, list[tuple[str, str]]]:
     """Split by subfolder (each subfolder = one class), preserving class distribution."""
+    if abs(sum(ratios[:3]) - 1.0) > 0.01:
+        raise ValueError(f"ratios 之和应为 1.0，当前为 {sum(ratios[:3]):.2f}")
     if len(ratios) == 2:
         ratios = (ratios[0], ratios[1], 0)
     random.seed(seed)
-    splits = {"train": [], "val": []}
+    splits: dict[str, list[tuple[str, str]]] = {"train": [], "val": []}
     if ratios[2] > 0:
         splits["test"] = []
 
@@ -86,14 +98,15 @@ def stratified_split(input_dir, output_dir, ratios=(0.7, 0.2, 0.1), seed=42):
     return splits
 
 
-def kfold_split(input_dir, output_dir, k=5, seed=42):
+def kfold_split(input_dir: str, output_dir: str, k: int = 5,
+                seed: int = 42) -> list[dict[str, int]]:
     """Generate K-fold cross-validation splits."""
     files = get_image_files(input_dir)
     random.seed(seed)
     random.shuffle(files)
     n = len(files)
     fold_size = n // k
-    folds = []
+    folds: list[dict[str, int]] = []
     for i in range(k):
         start = i * fold_size
         end = start + fold_size if i < k - 1 else n

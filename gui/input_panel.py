@@ -1,12 +1,14 @@
 """Input panel: file/folder selection with file list."""
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                                QListWidget, QListWidgetItem, QFileDialog, QLabel, QCheckBox)
+                                QListWidget, QListWidgetItem, QFileDialog, QLabel,
+                                QCheckBox, QComboBox, QLineEdit)
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QPixmap, QIcon
+import fnmatch
 import os
 from utils.helpers import get_image_files
-from core.image_io import read_image
 from gui.preview_widget import cv2_to_qpixmap
+
+_ALL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 
 
 class InputPanel(QWidget):
@@ -16,7 +18,7 @@ class InputPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._files = []
+        self._all_files = []
         self._setup_ui()
 
     def _setup_ui(self):
@@ -25,15 +27,17 @@ class InputPanel(QWidget):
 
         # Title
         title = QLabel("输入源")
-        f = title.font(); f.setBold(True); title.setFont(f)
+        f = title.font()
+        f.setBold(True)
+        title.setFont(f)
         layout.addWidget(title)
 
         # Buttons row
         btn_row = QHBoxLayout()
         self.btn_file = QPushButton("选择文件")
-        self.btn_file.clicked.connect(self._add_files)
+        self.btn_file.clicked.connect(self.add_files)
         self.btn_dir = QPushButton("选择文件夹")
-        self.btn_dir.clicked.connect(self._add_dir)
+        self.btn_dir.clicked.connect(self.add_dir)
         self.btn_clear = QPushButton("清空")
         self.btn_clear.clicked.connect(self._clear)
         btn_row.addWidget(self.btn_file)
@@ -46,6 +50,15 @@ class InputPanel(QWidget):
         self.chk_recursive.setChecked(True)
         layout.addWidget(self.chk_recursive)
 
+        # File filter
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("文件筛选:"))
+        self.txt_filter = QLineEdit()
+        self.txt_filter.setPlaceholderText("如: *_bottom.jpg 或 *.png，留空显示全部")
+        self.txt_filter.textChanged.connect(self._on_filter_changed)
+        filter_row.addWidget(self.txt_filter)
+        layout.addLayout(filter_row)
+
         # File list
         self.file_list = QListWidget()
         self.file_list.setSelectionMode(QListWidget.SingleSelection)
@@ -56,14 +69,14 @@ class InputPanel(QWidget):
         self.lbl_count = QLabel("共 0 张图片")
         layout.addWidget(self.lbl_count)
 
-    def _add_files(self):
+    def add_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "选择图片", "",
             "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp);;All Files (*)")
         if paths:
             self._add_paths(paths)
 
-    def _add_dir(self):
+    def add_dir(self):
         path = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if path:
             self._add_paths([path])
@@ -76,35 +89,64 @@ class InputPanel(QWidget):
             elif os.path.isdir(p):
                 new_files.extend(get_image_files(p))
 
-        existing = set(self._files)
+        existing = set(self._all_files)
         for f in new_files:
             if f not in existing:
-                self._files.append(f)
+                self._all_files.append(f)
                 existing.add(f)
-                item = QListWidgetItem(os.path.basename(f))
-                item.setToolTip(f)
-                self.file_list.addItem(item)
 
-        self._update_count()
-        if self._files:
-            self.filesChanged.emit(self._files)
+        self._refresh_list()
 
     def _clear(self):
-        self._files.clear()
+        self._all_files.clear()
         self.file_list.clear()
         self._update_count()
         self.filesChanged.emit([])
 
     def _on_item_clicked(self, item):
         idx = self.file_list.row(item)
-        if 0 <= idx < len(self._files):
-            self.previewRequested.emit(self._files[idx])
+        filtered = self._get_filtered_files()
+        if 0 <= idx < len(filtered):
+            self.previewRequested.emit(filtered[idx])
 
     def _update_count(self):
-        self.lbl_count.setText(f"共 {len(self._files)} 张图片")
+        filtered = self._get_filtered_files()
+        total = len(self._all_files)
+        if total == len(filtered):
+            self.lbl_count.setText(f"共 {total} 张图片")
+        else:
+            self.lbl_count.setText(f"共 {len(filtered)} / {total} 张图片")
+
+    def _get_filtered_files(self):
+        pattern = self.txt_filter.text().strip()
+        if not pattern:
+            return list(self._all_files)
+        return [f for f in self._all_files if fnmatch.fnmatch(os.path.basename(f), pattern)]
+
+    def _refresh_list(self):
+        filtered = self._get_filtered_files()
+        self.file_list.clear()
+        for f in filtered:
+            item = QListWidgetItem(os.path.basename(f))
+            item.setToolTip(f)
+            self.file_list.addItem(item)
+        self._update_count()
+        self.filesChanged.emit(filtered)
+
+    def _on_filter_changed(self):
+        self._refresh_list()
 
     def get_files(self):
-        return self._files
+        return self._get_filtered_files()
+
+    @property
+    def all_files(self):
+        return self._all_files
+
+    def get_file(self, index: int) -> str | None:
+        if 0 <= index < len(self._all_files):
+            return self._all_files[index]
+        return None
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():

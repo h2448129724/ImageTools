@@ -1,6 +1,6 @@
 # 图像处理工具箱
 
-面向深度学习的图像处理和数据集准备工具，提供可视化 GUI 操作界面。
+面向深度学习的图像处理和数据集准备工具，提供可视化 GUI 操作界面 + CLI 命令行。
 
 ## 环境要求
 
@@ -10,7 +10,29 @@
 ## 启动
 
 ```bash
+# GUI 模式
 python main.py
+
+# CLI 模式
+imagetools --help
+```
+
+## CLI 命令
+
+```bash
+imagetools split <input_dir> <output_dir>          # 随机划分数据集
+imagetools stratified-split <input_dir> <out>       # 分层划分
+imagetools kfold <input_dir> <output_dir> --k 5     # K 折交叉验证
+imagetools dedup <input_dir> [--mode perceptual]    # 图片去重（精确/感知）
+imagetools tile <input> <output_dir>                # 大图切块
+imagetools rename <input_dir> <output_dir>          # 批量重命名
+imagetools resize <input_dir> <output_dir>          # 批量缩放
+imagetools convert <input_dir> <output_dir>         # 批量格式转换
+imagetools border <input_dir> <output_dir>          # 批量添加边框
+imagetools augment <input_dir> <output_dir>         # 数据增强
+imagetools format yolo2coco <img_dir> <ann_dir>     # 标注格式转换
+imagetools annot validate <ann_dir> <img_dir>       # YOLO 标注校验
+imagetools annot stats <ann_dir> <img_dir>          # 标注统计
 ```
 
 ## 功能概览
@@ -35,6 +57,7 @@ BGR ↔ RGB ↔ HSV ↔ LAB ↔ YUV ↔ Gray ↔ HLS ↔ YCrCb 等 11 种颜色�
 | 移除/添加 Alpha 通道 | 透明背景转白底等 |
 | 图像叠加 | 贴图、加水印，支持透明度 |
 | 通道提取 | 提取单个 B/G/R/A 通道 |
+| 格式转换 | PNG/JPG/BMP/TIFF/WebP 互转 |
 
 ### 图像滤波
 | 功能 | 说明 |
@@ -52,6 +75,27 @@ BGR ↔ RGB ↔ HSV ↔ LAB ↔ YUV ↔ Gray ↔ HLS ↔ YCrCb 等 11 种颜色�
 | 网格切块 | 按行列数均匀切分 |
 | 分割标注切块 | 图片 + Labelme JSON 多边形标注联合切块，自动裁剪多边形并转换坐标系 |
 
+### 数据增强
+基于可组合 Pipeline 的数据增强框架，支持 17 种变换：
+
+| 类别 | 变换 |
+|------|------|
+| 几何变换 | RandomHorizontalFlip, RandomVerticalFlip, RandomRotate, RandomScale, RandomCrop, LetterboxResize, LongestMaxSize |
+| 颜色变换 | ColorJitter（亮度/对比度/饱和度/色相） |
+| 噪声 | GaussianNoise, SaltAndPepperNoise |
+| 模糊 | RandomGaussianBlur, RandomMotionBlur |
+| 遮挡 | RandomErasing, Cutout |
+| 归一化 | Normalize（ImageNet 均值/标准差） |
+| 多图融合 | MixUp, Mosaic |
+
+支持 Pipeline 配置的 JSON 序列化/反序列化，以及 `--config` 文件驱动的 CLI 批量增强。
+
+#### BBox-Aware 增强管道
+图像 + YOLO 边界框联合变换，适用于目标检测数据增强：
+- BBoxHorizontalFlip, BBoxVerticalFlip
+- BBoxScale, BBoxLetterboxResize, BBoxRandomCrop
+- BBoxColorJitter（仅变换图像，框不变）
+
 ### 数据集处理
 | 功能 | 说明 |
 |------|------|
@@ -68,16 +112,18 @@ BGR ↔ RGB ↔ HSV ↔ LAB ↔ YUV ↔ Gray ↔ HLS ↔ YCrCb 等 11 种颜色�
 | YOLO 标注校验 | 检测越界框、零面积框 |
 | 标注统计 | 类别分布、框尺寸分布 |
 | ROI 裁剪 | 根据标注框自动裁剪目标区域 |
+| Mask ↔ 多边形 | 二值 Mask 与 Labelme JSON 多边形互转 |
+| 标注增强 | YOLO / Labelme 标注联合增强（翻转/旋转/缩放/裁剪） |
 
 ### 批量处理
 | 功能 | 说明 |
 |------|------|
 | 批量重命名 | 按规则统一重命名 |
-| 批量缩放 | 统一调整图片尺寸 |
+| 批量缩放 | 统一调整图片尺寸（支持按比例） |
 | 批量 ROI 裁剪 | 所有图片裁同一位置区域 |
 | 批量格式转换 | PNG/JPG/BMP/TIFF/WebP 互转 |
 | 批量添加边框 | 统一加边框 |
-| 图片去重 | 基于 MD5 哈希查找重复图片 |
+| 图片去重 | 精确切重（MD5）+ 感知去重（dHash 汉明距离） |
 
 ## 操作方式
 
@@ -95,39 +141,79 @@ BGR ↔ RGB ↔ HSV ↔ LAB ↔ YUV ↔ Gray ↔ HLS ↔ YCrCb 等 11 种颜色�
 | Ctrl+O | 打开图片 |
 | Ctrl+D | 打开文件夹 |
 | Ctrl+R / F5 | 执行处理 |
+| Ctrl+Z | 撤销 |
+| Ctrl+Shift+Z / Ctrl+Y | 重做 |
 | Ctrl+Q | 退出 |
 | A | 上一张图片 |
 | D | 下一张图片 |
 | Esc | 退出坐标拾取模式 |
 
-## 坐标拾取
+## 特性
 
-点击预览工具栏的"坐标拾取"按钮激活，鼠标在图片上单击即可获取像素坐标并自动复制到剪贴板，方便编写 ROI 参数配置。
+- **EXIF 自动旋转**：读取 JPEG 时自动根据 EXIF 方向标签旋转图片
+- **Unicode 路径支持**：通过 imencode/imdecode 支持中文/特殊字符文件名
+- **并行处理**：批量操作使用 ThreadPoolExecutor 并行加速
+- **Undo/Redo**：最多 20 步撤销历史
+- **窗口状态持久化**：自动记住窗口大小和上次使用的功能
+- **安全 XML 生成**：使用 lxml etree 防止注入
+- **Header-only 图片信息**：PNG/JPEG 无需完整解码即可获取尺寸
 
 ## 项目结构
 
 ```
-img_tools/
-├── main.py                 # 入口
-├── requirements.txt        # 依赖
-├── core/                   # 核心处理逻辑
-│   ├── image_io.py         # 图像读写
-│   ├── color_conversion.py # 颜色空间转换
-│   ├── basic_processing.py # 基础处理、滤波、形态学
-│   ├── tiling.py           # 大图切块
+ImageTools/
+├── main.py                     # GUI 入口
+├── cli.py                      # CLI 入口
+├── pyproject.toml              # 包配置 + 入口点
+├── requirements.txt            # 依赖
+├── core/                       # 核心处理逻辑
+│   ├── image_io.py             # 图像读写 + EXIF 自动旋转
+│   ├── color_conversion.py     # 颜色空间转换
+│   ├── basic_processing.py     # 基础处理、滤波、形态学
+│   ├── augmentation.py         # 可组合数据增强 Pipeline
+│   ├── tiling.py               # 大图切块
 │   ├── segmentation_tiling.py  # 分割标注联合切块
-│   ├── dataset_split.py    # 数据集划分
+│   ├── dataset_split.py        # 数据集划分
 │   ├── format_conversion.py    # 标注格式转换
-│   ├── batch_processing.py # 批量操作
-│   └── annotation.py       # 标注可视化/校验/统计
-├── gui/                    # PySide6 图形界面
-│   ├── main_window.py      # 主窗口
-│   ├── input_panel.py      # 输入面板
-│   ├── function_panel.py   # 功能树 + 搜索
-│   ├── param_panel.py      # 动态参数面板
-│   ├── preview_widget.py   # 图像预览 + 坐标拾取
-│   ├── output_panel.py     # 输出设置
-│   └── workers.py          # 后台线程
-└── utils/
-    └── helpers.py          # 文件工具、哈希去重
+│   ├── batch_processing.py     # 批量操作 + 感知去重
+│   ├── annotation.py           # 标注可视化/校验/统计
+│   ├── annotation_augment.py   # 标注联合增强
+│   └── mask_polygon.py         # Mask ↔ 多边形转换
+├── gui/                        # PySide6 图形界面
+│   ├── main_window.py          # 主窗口 + Undo/Redo
+│   ├── input_panel.py          # 输入面板
+│   ├── function_panel.py       # 功能树 + 搜索
+│   ├── param_panel.py          # 动态参数面板
+│   ├── preview_widget.py       # 图像预览 + 坐标拾取
+│   ├── output_panel.py         # 输出设置
+│   └── workers.py              # 后台线程
+├── utils/
+│   └── helpers.py              # 文件工具、哈希
+└── tests/                      # 289 个单元测试
+    ├── test_augmentation.py
+    ├── test_annotation_augment.py
+    ├── test_annotation.py
+    ├── test_batch_processing.py
+    ├── test_basic_processing.py
+    ├── test_color_conversion.py
+    ├── test_dataset_split.py
+    ├── test_format_conversion.py
+    ├── test_helpers.py
+    ├── test_image_io.py
+    ├── test_mask_polygon.py
+    ├── test_segmentation_tiling.py
+    └── test_tiling.py
 ```
+
+## 测试
+
+```bash
+python -m pytest tests/ -v
+```
+
+## 依赖
+
+- PySide6 — GUI 框架
+- OpenCV (cv2) — 图像处理
+- NumPy — 数值计算
+- lxml — XML 安全生成

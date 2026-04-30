@@ -3,6 +3,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                 QLabel, QLineEdit, QFileDialog, QComboBox)
 from PySide6.QtCore import Signal
 import os
+import sys
+import subprocess
 
 
 class OutputPanel(QWidget):
@@ -18,7 +20,9 @@ class OutputPanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         title = QLabel("输出设置")
-        f = title.font(); f.setBold(True); title.setFont(f)
+        f = title.font()
+        f.setBold(True)
+        title.setFont(f)
         layout.addWidget(title)
 
         # Output directory
@@ -45,7 +49,12 @@ class OutputPanel(QWidget):
     def _open_output(self):
         path = self.output_dir.text()
         if path and os.path.isdir(path):
-            os.startfile(path)
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
 
     def get_output_dir(self):
         return self.output_dir.text()

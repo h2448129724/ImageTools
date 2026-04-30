@@ -1,35 +1,47 @@
+from __future__ import annotations
+
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
 
-def crop_image(img, x, y, w, h):
+def crop_image(img: NDArray[np.uint8], x: int, y: int, w: int, h: int) -> NDArray[np.uint8]:
+    ih, iw = img.shape[:2]
+    x = max(0, min(x, iw - 1))
+    y = max(0, min(y, ih - 1))
+    w = max(1, min(w, iw - x))
+    h = max(1, min(h, ih - y))
     return img[y:y + h, x:x + w].copy()
 
 
-def center_crop(img, w, h):
+def center_crop(img: NDArray[np.uint8], w: int, h: int) -> NDArray[np.uint8]:
     ih, iw = img.shape[:2]
     x = max(0, (iw - w) // 2)
     y = max(0, (ih - h) // 2)
     return img[y:y + h, x:x + w].copy()
 
 
-def pad_image(img, top, bottom, left, right, mode="constant", value=(0, 0, 0)):
+def pad_image(img: NDArray[np.uint8], top: int, bottom: int, left: int, right: int,
+              mode: str = "constant", value: int | tuple[int, int, int] = 0) -> NDArray[np.uint8]:
     """Pad image edges. mode: constant, reflect, replicate."""
     border_map = {"constant": cv2.BORDER_CONSTANT, "reflect": cv2.BORDER_REFLECT,
                   "replicate": cv2.BORDER_REPLICATE}
+    pad_val = value if mode == "constant" else None
     return cv2.copyMakeBorder(img, top, bottom, left, right,
                               border_map.get(mode, cv2.BORDER_CONSTANT),
-                              value=value if mode == "constant" else None)
+                              value=pad_val)
 
 
-def rotate_image(img, angle, center=None, scale=1.0, keep_size=True):
+def rotate_image(img: NDArray[np.uint8], angle: float, center: tuple[int, int] | None = None,
+                 scale: float = 1.0, keep_size: bool = True) -> NDArray[np.uint8]:
     h, w = img.shape[:2]
     if center is None:
         center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, angle, scale)
     if keep_size:
         return cv2.warpAffine(img, M, (w, h))
-    cos = abs(M[0, 0]); sin = abs(M[0, 1])
+    cos = abs(M[0, 0])
+    sin = abs(M[0, 1])
     new_w = int(h * sin + w * cos)
     new_h = int(h * cos + w * sin)
     M[0, 2] += new_w / 2 - center[0]
@@ -37,28 +49,34 @@ def rotate_image(img, angle, center=None, scale=1.0, keep_size=True):
     return cv2.warpAffine(img, M, (new_w, new_h))
 
 
-def flip_image(img, direction):
+def flip_image(img: NDArray[np.uint8], direction: str) -> NDArray[np.uint8]:
     """direction: 'horizontal' (1), 'vertical' (0), 'both' (-1)"""
     code = {"horizontal": 1, "vertical": 0, "both": -1}
     return cv2.flip(img, code.get(direction, 1))
 
 
-def adjust_brightness_contrast(img, brightness=0, contrast=1.0):
+def adjust_brightness_contrast(img: NDArray[np.uint8], brightness: int = 0,
+                               contrast: float = 1.0) -> NDArray[np.uint8]:
     """brightness: -255 to 255, contrast: >0 (1.0 = no change)"""
+    if brightness == 0 and contrast == 1.0:
+        return img
     img = img.astype(np.float32)
     img = contrast * img + brightness
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def adjust_saturation(img, factor=1.0):
+def adjust_saturation(img: NDArray[np.uint8], factor: float = 1.0) -> NDArray[np.uint8]:
     """Adjust saturation. factor: 0=grayscale, 1.0=original, >1=more saturated."""
+    if len(img.shape) == 2 or img.shape[2] != 3:
+        return img
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
     hsv[:, :, 1] *= factor
     hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
     return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
 
-def histogram_equalize(img, adaptive=False, clip_limit=2.0, tile_size=8):
+def histogram_equalize(img: NDArray[np.uint8], adaptive: bool = False,
+                       clip_limit: float = 2.0, tile_size: int = 8) -> NDArray[np.uint8]:
     """Histogram equalization. adaptive=CLAHE for localized."""
     if len(img.shape) == 3:
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
@@ -76,7 +94,7 @@ def histogram_equalize(img, adaptive=False, clip_limit=2.0, tile_size=8):
     return cv2.equalizeHist(img)
 
 
-def apply_filter(img, filter_type, ksize=3):
+def apply_filter(img: NDArray[np.uint8], filter_type: str, ksize: int = 3) -> NDArray[np.uint8]:
     """Apply various filters: blur, gaussian, median, bilateral, sharpen."""
     if filter_type == "blur":
         return cv2.blur(img, (ksize, ksize))
@@ -92,7 +110,8 @@ def apply_filter(img, filter_type, ksize=3):
     return img
 
 
-def edge_detect(img, method="canny", threshold1=100, threshold2=200):
+def edge_detect(img: NDArray[np.uint8], method: str = "canny", threshold1: float = 100,
+                threshold2: float = 200) -> NDArray[np.uint8]:
     """Edge detection: canny, sobel, laplacian."""
     gray = img if len(img.shape) == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     if method == "canny":
@@ -106,7 +125,8 @@ def edge_detect(img, method="canny", threshold1=100, threshold2=200):
     return gray
 
 
-def threshold_image(img, method="otsu", thresh=127, maxval=255, block_size=11, C=2):
+def threshold_image(img: NDArray[np.uint8], method: str = "otsu", thresh: float = 127,
+                    maxval: float = 255, block_size: int = 11, C: int = 2) -> NDArray[np.uint8]:
     """Threshold: binary, otsu, adaptive_mean, adaptive_gaussian."""
     gray = img if len(img.shape) == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     if method == "binary":
@@ -124,7 +144,8 @@ def threshold_image(img, method="otsu", thresh=127, maxval=255, block_size=11, C
     return gray
 
 
-def morphology_op(img, op_type="erode", ksize=3, iterations=1):
+def morphology_op(img: NDArray[np.uint8], op_type: str = "erode", ksize: int = 3,
+                  iterations: int = 1) -> NDArray[np.uint8]:
     """Morphological operations: erode, dilate, open, close."""
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
     ops = {"erode": cv2.MORPH_ERODE, "dilate": cv2.MORPH_DILATE,
@@ -132,7 +153,7 @@ def morphology_op(img, op_type="erode", ksize=3, iterations=1):
     return cv2.morphologyEx(img, ops.get(op_type, cv2.MORPH_ERODE), kernel, iterations=iterations)
 
 
-def remove_alpha(img, bg_color=(255, 255, 255)):
+def remove_alpha(img: NDArray[np.uint8], bg_color: tuple[int, int, int] = (255, 255, 255)) -> NDArray[np.uint8]:
     """Flatten alpha channel onto a background color."""
     if len(img.shape) < 3 or img.shape[2] != 4:
         return img
@@ -142,7 +163,7 @@ def remove_alpha(img, bg_color=(255, 255, 255)):
     return (bgr * alpha + bg * (1 - alpha)).astype(np.uint8)
 
 
-def add_alpha(img, alpha_value=255):
+def add_alpha(img: NDArray[np.uint8], alpha_value: int = 255) -> NDArray[np.uint8]:
     """Add an alpha channel to an image."""
     if len(img.shape) == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -152,21 +173,30 @@ def add_alpha(img, alpha_value=255):
     return img
 
 
-def overlay_image(background, foreground, x=0, y=0, opacity=1.0):
+def overlay_image(background: NDArray[np.uint8], foreground: NDArray[np.uint8],
+                  x: int = 0, y: int = 0, opacity: float = 1.0) -> NDArray[np.uint8]:
     """Overlay foreground on background with alpha support."""
+    if len(foreground.shape) == 2:
+        foreground = cv2.cvtColor(foreground, cv2.COLOR_GRAY2BGR)
+    if len(background.shape) == 2:
+        background = cv2.cvtColor(background, cv2.COLOR_GRAY2BGR)
     result = background.copy()
     fg_h, fg_w = foreground.shape[:2]
     bg_h, bg_w = result.shape[:2]
     x = max(0, min(x, bg_w)); y = max(0, min(y, bg_h))
     roi_w = min(fg_w, bg_w - x); roi_h = min(fg_h, bg_h - y)
+    if roi_w <= 0 or roi_h <= 0:
+        return result
 
-    if foreground.shape[2] == 4:
-        fg_bgr = foreground[:roi_h, :roi_w, :3]
-        fg_alpha = (foreground[:roi_h, :roi_w, 3:4] / 255.0) * opacity
+    fg_roi = foreground[:roi_h, :roi_w]
+    has_alpha = fg_roi.shape[2] == 4 if len(fg_roi.shape) == 3 else False
+    if has_alpha:
+        fg_bgr = fg_roi[:, :, :3]
+        fg_alpha = (fg_roi[:, :, 3:4] / 255.0) * opacity
         bg_roi = result[y:y + roi_h, x:x + roi_w]
         result[y:y + roi_h, x:x + roi_w] = (fg_bgr * fg_alpha + bg_roi * (1 - fg_alpha)).astype(np.uint8)
     else:
-        fg_roi = foreground[:roi_h, :roi_w, :3]
-        blended = cv2.addWeighted(fg_roi, opacity, result[y:y + roi_h, x:x + roi_w], 1 - opacity, 0)
+        fg_bgr = fg_roi[:, :, :3] if len(fg_roi.shape) == 3 else cv2.cvtColor(fg_roi, cv2.COLOR_GRAY2BGR)
+        blended = cv2.addWeighted(fg_bgr, opacity, result[y:y + roi_h, x:x + roi_w], 1 - opacity, 0)
         result[y:y + roi_h, x:x + roi_w] = blended
     return result

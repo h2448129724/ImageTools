@@ -3,6 +3,7 @@ import os
 import json
 import cv2
 import numpy as np
+from core.image_io import read_image, write_image
 from utils.helpers import ensure_dir, get_image_files
 
 
@@ -13,6 +14,49 @@ def _create_polygon_mask(shape, img_h, img_w):
     points = points.astype(np.int32)
     cv2.fillPoly(mask, [points], 255)
     return mask
+
+
+def _shape_bbox(shape):
+    """Return (x_min, y_min, x_max, y_max) bounding box of a shape's points."""
+    pts = np.array(shape["points"], dtype=np.float64)
+    x_min, y_min = pts.min(axis=0)
+    x_max, y_max = pts.max(axis=0)
+    return x_min, y_min, x_max, y_max
+
+
+def _create_tile_mask_for_shape(shape, tile_x, tile_y, tile_w, tile_h, pad_w, pad_h):
+    """Render a polygon into a tile-resolution mask with optional padding.
+
+    Args:
+        shape: Labelme shape dict with "points" key.
+        tile_x, tile_y: Top-left corner of the tile in image coordinates.
+        tile_w, tile_h: Usable tile size (may be smaller at edges).
+        pad_w, pad_h: Padded tile size (tile dimensions; >= tile_w/tile_h).
+    Returns:
+        (mask, has_content) — mask is (pad_h, pad_w) uint8, has_content indicates
+        whether any polygon pixels fall within the tile.
+    """
+    points = np.array(shape["points"], dtype=np.float32)
+    # Shift to tile-local coordinates
+    local_pts = points - np.array([tile_x, tile_y])
+
+    # Clamp to tile bounds to avoid drawing far outside
+    mask = np.zeros((pad_h, pad_w), dtype=np.uint8)
+    int_pts = local_pts.reshape((-1, 1, 2)).astype(np.int32)
+    cv2.fillPoly(mask, [int_pts], 255)
+
+    # Only keep the usable region
+    tile_mask = mask[:tile_h, :tile_w]
+
+    if not np.any(tile_mask):
+        return None, False
+
+    # If we need padding (incomplete edge tile), embed in full tile size
+    if pad_w > tile_w or pad_h > tile_h:
+        padded = np.zeros((pad_h, pad_w), dtype=np.uint8)
+        padded[:tile_h, :tile_w] = tile_mask
+        return padded, True
+    return tile_mask, True
 
 
 def _extract_shapes_from_mask(mask, label, x_offset, y_offset, shape_type="polygon"):
@@ -85,7 +129,7 @@ def tile_segmentation_dataset(image_dir, ann_dir, output_dir, tile_w=256, tile_h
     total_skipped_incomplete = 0
 
     for idx, (base, img_path, ann_path) in enumerate(pairs):
-        img = cv2.imread(img_path)
+        img = read_image(img_path)
         if img is None:
             continue
 
@@ -117,7 +161,10 @@ def tile_segmentation_dataset(image_dir, ann_dir, output_dir, tile_w=256, tile_h
                         x += step_x
                         continue
                     # Pad the image tile
-                    tile_img = np.zeros((tile_h, tile_w, 3), dtype=np.uint8)
+                    if len(img.shape) == 2:
+                        tile_img = np.zeros((tile_h, tile_w), dtype=np.uint8)
+                    else:
+                        tile_img = np.zeros((tile_h, tile_w, img.shape[2]), dtype=np.uint8)
                     tile_img[:th, :tw] = img[y:y2, x:x2]
                 else:
                     tile_img = img[y:y2, x:x2].copy()
@@ -125,24 +172,23 @@ def tile_segmentation_dataset(image_dir, ann_dir, output_dir, tile_w=256, tile_h
                 # Extract shapes within this tile
                 tile_shapes = []
                 for shape in shapes:
-                    label = shape.get("label", "")
-                    # Create mask for this shape on the full image
-                    mask = _create_polygon_mask(shape, ih, iw)
-                    # Crop to tile region
-                    tile_mask = mask[y:y2, x:x2]
-                    if discard_incomplete and (tw < tile_w or th < tile_h):
-                        # For incomplete tiles, pad the mask too
-                        padded_mask = np.zeros((tile_h, tile_w), dtype=np.uint8)
-                        padded_mask[:th, :tw] = tile_mask
-                        tile_mask = padded_mask
+                    # Bounding-box overlap check — skip non-overlapping shapes early
+                    sx_min, sy_min, sx_max, sy_max = _shape_bbox(shape)
+                    if sx_max <= x or sx_min >= x2 or sy_max <= y or sy_min >= y2:
+                        continue
 
-                    if np.any(tile_mask):
-                        # Extract shapes from the cropped/padded mask
-                        extracted = _extract_shapes_from_mask(
-                            tile_mask, label, x, y,
-                            shape.get("shape_type", "polygon")
-                        )
-                        tile_shapes.extend(extracted)
+                    label = shape.get("label", "")
+                    tile_mask, has_content = _create_tile_mask_for_shape(
+                        shape, x, y, tw, th, tile_w, tile_h
+                    )
+                    if not has_content or tile_mask is None:
+                        continue
+
+                    extracted = _extract_shapes_from_mask(
+                        tile_mask, label, x, y,
+                        shape.get("shape_type", "polygon")
+                    )
+                    tile_shapes.extend(extracted)
 
                 # Decide whether to save
                 if discard_empty and not tile_shapes:
@@ -151,7 +197,7 @@ def tile_segmentation_dataset(image_dir, ann_dir, output_dir, tile_w=256, tile_h
                     tile_name = f"{base}_x{x:04d}_y{y:04d}_w{tw}_h{th}"
                     # Save image
                     img_out = os.path.join(out_img_dir, f"{tile_name}.png")
-                    cv2.imwrite(img_out, tile_img)
+                    write_image(img_out, tile_img)
 
                     # Save annotation
                     tile_ann = {
@@ -195,17 +241,18 @@ def tile_segmentation_dataset(image_dir, ann_dir, output_dir, tile_w=256, tile_h
 def tile_segmentation_single(image_path, ann_path, output_dir, tile_w=256, tile_h=256,
                               overlap=0, discard_empty=False, discard_incomplete=False):
     """Tile a single image + annotation pair (for single-image preview flow)."""
+    import tempfile
+    import shutil
     base = os.path.splitext(os.path.basename(image_path))[0]
-    import tempfile, shutil
-    tmp_img = os.path.join(tempfile.mkdtemp(), base + os.path.splitext(image_path)[1])
-    tmp_ann = os.path.join(os.path.dirname(tmp_img), base + ".json")
-    shutil.copy2(image_path, tmp_img)
-    shutil.copy2(ann_path, tmp_ann)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_img = os.path.join(tmp_dir, base + os.path.splitext(image_path)[1])
+        tmp_ann = os.path.join(tmp_dir, base + ".json")
+        shutil.copy2(image_path, tmp_img)
+        shutil.copy2(ann_path, tmp_ann)
 
-    result = tile_segmentation_dataset(
-        os.path.dirname(tmp_img), os.path.dirname(tmp_ann),
-        output_dir, tile_w, tile_h, overlap,
-        discard_empty, discard_incomplete
-    )
-    shutil.rmtree(os.path.dirname(tmp_img))
+        result = tile_segmentation_dataset(
+            tmp_dir, tmp_dir,
+            output_dir, tile_w, tile_h, overlap,
+            discard_empty, discard_incomplete
+        )
     return result
