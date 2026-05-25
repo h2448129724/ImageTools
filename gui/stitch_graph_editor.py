@@ -10,7 +10,7 @@ from typing import Optional
 import cv2
 import numpy as np
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QWheelEvent
+from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -37,6 +37,13 @@ PENDING_POINT_COLOR = QColor(255, 255, 255)
 EDGE_COLOR = QColor(255, 180, 0)
 DEFAULT_IMAGE_DIR = r"D:\project\changrui\CAB-F\sew_point\images"
 DEFAULT_LABEL_DIR = r"D:\project\changrui\CAB-F\sew_point\train_edge_labeled"
+POINT_LABEL_ALIASES = {"sew", "keypoint"}
+MODE_STATUS_STYLES = {
+    "edge": ("当前模式：连边", "background:#fff3cd;color:#856404;border:1px solid #ffe08a;padding:6px;border-radius:4px;"),
+    "add": ("当前模式：新增点", "background:#d1f7d6;color:#176b2c;border:1px solid #8bd8a0;padding:6px;border-radius:4px;"),
+    "move": ("当前模式：移动点", "background:#d8ebff;color:#155a9c;border:1px solid #8ec2ff;padding:6px;border-radius:4px;"),
+    "delete": ("当前模式：删点", "background:#ffe1e1;color:#a12626;border:1px solid #ff9e9e;padding:6px;border-radius:4px;"),
+}
 
 
 def read_image(image_path) -> np.ndarray:
@@ -82,7 +89,7 @@ def load_labelme_points(json_path: Path) -> list[dict]:
             continue
         if shape.get("shape_type") != "point":
             continue
-        if str(shape.get("label", "")).strip() != "sew":
+        if str(shape.get("label", "")).strip().lower() not in POINT_LABEL_ALIASES:
             continue
         raw_points = shape.get("points", [])
         if not raw_points or len(raw_points[0]) < 2:
@@ -164,12 +171,16 @@ class FolderItem:
         return self.image_path.stem
 
 
-def collect_folder_items(folder: Path) -> list[FolderItem]:
+def collect_folder_items(image_folder: Path, label_folder: Optional[Path] = None) -> list[FolderItem]:
+    label_map: dict[str, Path] = {}
+    if label_folder is not None and label_folder.exists():
+        label_map = {path.stem: path for path in sorted(label_folder.glob("*.json"))}
+
     items: list[FolderItem] = []
-    for path in sorted(folder.iterdir()):
+    for path in sorted(image_folder.iterdir()):
         if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
-            source_json = path.with_suffix(".json")
-            items.append(FolderItem(image_path=path, source_json_path=source_json if source_json.exists() else None))
+            source_json = label_map.get(path.stem)
+            items.append(FolderItem(image_path=path, source_json_path=source_json))
     return items
 
 
@@ -196,11 +207,13 @@ class EdgeAnnotationCanvas(QWidget):
         self.edges: list[dict] = []
         self.selected_point_id: Optional[int] = None
         self.pending_start_id: Optional[int] = None
+        self.mode: str = "edge"
 
         self.scale = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
         self._pan_anchor: Optional[QPoint] = None
+        self._drag_point_id: Optional[int] = None
 
     def set_image(self, image_bgr: np.ndarray, image_path: str = ""):
         self.image_bgr = image_bgr
@@ -232,6 +245,20 @@ class EdgeAnnotationCanvas(QWidget):
         self.edgeCountChanged.emit(len(self.edges))
         self.update()
 
+    def set_mode(self, mode: str):
+        self.mode = mode
+        if mode != "edge":
+            self.pending_start_id = None
+            self.pendingChanged.emit(None)
+        cursor_map = {
+            "edge": Qt.PointingHandCursor,
+            "add": Qt.CrossCursor,
+            "move": Qt.OpenHandCursor,
+            "delete": Qt.ForbiddenCursor,
+        }
+        self.setCursor(QCursor(cursor_map.get(mode, Qt.ArrowCursor)))
+        self.update()
+
     def clear_edges(self):
         self.edges = []
         self.pending_start_id = None
@@ -248,6 +275,49 @@ class EdgeAnnotationCanvas(QWidget):
         self.edgeCountChanged.emit(len(self.edges))
         self.annotationModified.emit()
         self.statusMessage.emit(f"已撤销连边 {removed['src']} - {removed['dst']}")
+        self.update()
+
+    def _next_point_id(self) -> int:
+        if not self.points:
+            return 0
+        return max(int(point["id"]) for point in self.points) + 1
+
+    def _remove_point_and_edges(self, point_id: int):
+        point_id = int(point_id)
+        before_points = len(self.points)
+        before_edges = len(self.edges)
+        self.points = [point for point in self.points if int(point["id"]) != point_id]
+        self.edges = [
+            edge for edge in self.edges
+            if int(edge["src"]) != point_id and int(edge["dst"]) != point_id
+        ]
+        self.selected_point_id = None if self.selected_point_id == point_id else self.selected_point_id
+        self.pending_start_id = None if self.pending_start_id == point_id else self.pending_start_id
+        self.pointSelectionChanged.emit(None)
+        self.pointCountChanged.emit(len(self.points))
+        self.edgeCountChanged.emit(len(self.edges))
+        self.pendingChanged.emit(self.pending_start_id)
+        self.annotationModified.emit()
+        self.statusMessage.emit(
+            f"已删除点 {point_id}，移除 {before_points - len(self.points)} 个点和 {before_edges - len(self.edges)} 条边。"
+        )
+        self.update()
+
+    def _add_point(self, image_x: float, image_y: float):
+        point_id = self._next_point_id()
+        point = {
+            "id": point_id,
+            "x": float(image_x),
+            "y": float(image_y),
+            "score": 1.0,
+            "source": "manual",
+        }
+        self.points.append(point)
+        self.selected_point_id = point_id
+        self.pointSelectionChanged.emit(point)
+        self.pointCountChanged.emit(len(self.points))
+        self.annotationModified.emit()
+        self.statusMessage.emit(f"已新增点 {point_id} ({image_x:.1f}, {image_y:.1f})")
         self.update()
 
     def fit_view(self):
@@ -391,7 +461,7 @@ class EdgeAnnotationCanvas(QWidget):
             painter.drawText(cx + 6, cy - 6, str(point_id))
 
         painter.setPen(QColor(80, 255, 80))
-        painter.drawText(10, 22, f"points={len(self.points)} edges={len(self.edges)} zoom={self.scale:.2f}")
+        painter.drawText(10, 22, f"mode={self.mode} points={len(self.points)} edges={len(self.edges)} zoom={self.scale:.2f}")
 
     def mousePressEvent(self, event):
         if self.image_qimage is None:
@@ -412,6 +482,11 @@ class EdgeAnnotationCanvas(QWidget):
 
         image_x, image_y = self._canvas_to_image(event.position().toPoint())
         nearest = self._nearest_point(image_x, image_y)
+
+        if self.mode == "add":
+            self._add_point(image_x, image_y)
+            return
+
         if nearest is None:
             self.selected_point_id = None
             self.pointSelectionChanged.emit(None)
@@ -421,6 +496,16 @@ class EdgeAnnotationCanvas(QWidget):
         point_id = int(nearest["id"])
         self.selected_point_id = point_id
         self.pointSelectionChanged.emit(nearest)
+
+        if self.mode == "delete":
+            self._remove_point_and_edges(point_id)
+            return
+
+        if self.mode == "move":
+            self._drag_point_id = point_id
+            self.statusMessage.emit(f"已选择点 {point_id}，拖动可修改位置。")
+            self.update()
+            return
 
         if self.pending_start_id is None:
             self.pending_start_id = point_id
@@ -449,6 +534,16 @@ class EdgeAnnotationCanvas(QWidget):
     def mouseMoveEvent(self, event):
         if self.image_qimage is None:
             return
+        if self._drag_point_id is not None and self.mode == "move":
+            image_x, image_y = self._canvas_to_image(event.position().toPoint())
+            point = self._find_point(self._drag_point_id)
+            if point is not None:
+                point["x"] = float(image_x)
+                point["y"] = float(image_y)
+                self.pointSelectionChanged.emit(point)
+                self.annotationModified.emit()
+                self.update()
+            return
         if self._pan_anchor is not None:
             delta = event.pos() - self._pan_anchor
             self.pan_x -= delta.x() / max(self.scale, 1e-6)
@@ -457,6 +552,11 @@ class EdgeAnnotationCanvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._drag_point_id is not None:
+            point = self._find_point(self._drag_point_id)
+            if point is not None:
+                self.statusMessage.emit(f"已移动点 {self._drag_point_id} 到 ({point['x']:.1f}, {point['y']:.1f})")
+            self._drag_point_id = None
         if event.button() == Qt.RightButton:
             self._pan_anchor = None
 
@@ -483,7 +583,7 @@ class EdgeAnnotationCanvas(QWidget):
 class StitchGraphEditorDialog(QDialog):
     def __init__(self, parent=None, image: Optional[np.ndarray] = None, image_path: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("CAB-F 连边标注器")
+        self.setWindowTitle("CAB-F 点边一体标注器")
         self.resize(1600, 960)
 
         self.folder_items: list[FolderItem] = []
@@ -510,6 +610,10 @@ class StitchGraphEditorDialog(QDialog):
         self.edit_out_dir = QLineEdit(DEFAULT_LABEL_DIR)
         folder_layout.addRow("图片文件夹", self.edit_src_dir)
         folder_layout.addRow("标签文件夹", self.edit_out_dir)
+        self.check_overwrite_source = QPushButton("直接覆盖原标签：关")
+        self.check_overwrite_source.setCheckable(True)
+        self.check_overwrite_source.toggled.connect(self._on_toggle_overwrite_source)
+        folder_layout.addRow("保存方式", self.check_overwrite_source)
         left_layout.addWidget(folder_box)
 
         row_folder = QHBoxLayout()
@@ -558,16 +662,27 @@ class StitchGraphEditorDialog(QDialog):
         row_edge.addWidget(self.btn_clear_edges)
         left_layout.addLayout(row_edge)
 
+        row_mode = QHBoxLayout()
+        self.btn_mode_edge = QPushButton("连边模式")
+        self.btn_mode_add = QPushButton("新增点")
+        self.btn_mode_move = QPushButton("移动点")
+        self.btn_mode_delete = QPushButton("删点")
+        for btn in (self.btn_mode_edge, self.btn_mode_add, self.btn_mode_move, self.btn_mode_delete):
+            btn.setCheckable(True)
+            row_mode.addWidget(btn)
+        left_layout.addLayout(row_mode)
+
         self.file_list = QListWidget()
         left_layout.addWidget(self.file_list, 1)
 
         self.lbl_help = QLabel(
             "使用方式\n"
-            "1. 选择图片文件夹和标签文件夹\n"
-            "2. 程序会自动读取同名 json，并把点显示到图上\n"
-            "3. 左键点两个点即可添加或取消一条边\n"
-            "4. Shift+左键可连续串边，右键取消当前起点\n"
-            "5. A/D 切图，S 保存，+/- 缩放"
+            "1. 分别选择图片文件夹和标签文件夹\n"
+            "2. 程序会按同名文件匹配图片和 json，并把点显示到图上\n"
+            "3. 连边模式下，左键点两个点即可添加或取消一条边\n"
+            "4. 新增点/移动点/删点模式用于修正缝纫点\n"
+            "5. Shift+左键可连续串边，右键取消当前起点或平移\n"
+            "6. A/D 切图，S 保存，+/- 缩放"
         )
         self.lbl_help.setWordWrap(True)
         left_layout.addWidget(self.lbl_help)
@@ -579,6 +694,7 @@ class StitchGraphEditorDialog(QDialog):
         splitter.addWidget(left)
         splitter.addWidget(self.canvas)
         splitter.setSizes([420, 1180])
+        self._set_mode("edge")
 
     def _connect_signals(self):
         self.btn_choose_src.clicked.connect(self.choose_src_dir)
@@ -590,6 +706,10 @@ class StitchGraphEditorDialog(QDialog):
         self.btn_save.clicked.connect(lambda: self.save_current_annotation(silent=False))
         self.btn_undo_edge.clicked.connect(self.canvas.undo_last_edge)
         self.btn_clear_edges.clicked.connect(self.canvas.clear_edges)
+        self.btn_mode_edge.clicked.connect(lambda: self._set_mode("edge"))
+        self.btn_mode_add.clicked.connect(lambda: self._set_mode("add"))
+        self.btn_mode_move.clicked.connect(lambda: self._set_mode("move"))
+        self.btn_mode_delete.clicked.connect(lambda: self._set_mode("delete"))
         self.file_list.currentRowChanged.connect(self.jump_to_index)
         self.canvas.pointSelectionChanged.connect(self._on_point_selection_changed)
         self.canvas.pointCountChanged.connect(lambda count: self.lbl_point_count.setText(str(count)))
@@ -597,6 +717,40 @@ class StitchGraphEditorDialog(QDialog):
         self.canvas.pendingChanged.connect(self._on_pending_changed)
         self.canvas.statusMessage.connect(self.status_label.setText)
         self.canvas.annotationModified.connect(self._auto_save_current)
+        self._apply_mode_status_style("edge")
+
+    def _set_mode(self, mode: str):
+        mapping = {
+            "edge": self.btn_mode_edge,
+            "add": self.btn_mode_add,
+            "move": self.btn_mode_move,
+            "delete": self.btn_mode_delete,
+        }
+        for key, button in mapping.items():
+            button.blockSignals(True)
+            button.setChecked(key == mode)
+            button.blockSignals(False)
+        self.canvas.set_mode(mode)
+        self._apply_mode_status_style(mode)
+
+    def _apply_mode_status_style(self, mode: str):
+        text, style = MODE_STATUS_STYLES.get(mode, ("当前模式已切换", ""))
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(style)
+
+    def _set_status_message(self, text: str):
+        self.status_label.setText(text)
+
+    def _on_toggle_overwrite_source(self, checked: bool):
+        self.check_overwrite_source.setText(f"直接覆盖原标签：{'开' if checked else '关'}")
+        if checked:
+            self.edit_out_dir.setEnabled(False)
+            self.btn_choose_out.setEnabled(False)
+            self._set_status_message("已开启直接覆盖原标签。保存时会写回原始 json 或同目录 json。")
+        else:
+            self.edit_out_dir.setEnabled(True)
+            self.btn_choose_out.setEnabled(True)
+            self._apply_mode_status_style(self.canvas.mode)
 
     def choose_src_dir(self):
         path = QFileDialog.getExistingDirectory(self, "选择图片文件夹", self.edit_src_dir.text().strip())
@@ -610,11 +764,16 @@ class StitchGraphEditorDialog(QDialog):
             self._auto_save_current()
 
     def open_folder(self):
-        folder = Path(self.edit_src_dir.text().strip())
-        if not folder.exists():
+        image_folder = Path(self.edit_src_dir.text().strip())
+        label_folder_text = self.edit_out_dir.text().strip()
+        label_folder = Path(label_folder_text) if label_folder_text else None
+        if not image_folder.exists():
             QMessageBox.warning(self, "提示", "图片文件夹不存在。")
             return
-        self.folder_items = collect_folder_items(folder)
+        if label_folder is None or not label_folder.exists():
+            QMessageBox.warning(self, "提示", "标签文件夹不存在。")
+            return
+        self.folder_items = collect_folder_items(image_folder, label_folder)
         self.file_list.blockSignals(True)
         self.file_list.clear()
         for item in self.folder_items:
@@ -630,6 +789,10 @@ class StitchGraphEditorDialog(QDialog):
         self.jump_to_index(0)
 
     def _build_output_path(self, item: FolderItem) -> Optional[Path]:
+        if self.check_overwrite_source.isChecked():
+            if item.source_json_path is not None:
+                return item.source_json_path
+            return item.image_path.with_suffix(".json")
         out_dir_text = self.edit_out_dir.text().strip()
         if not out_dir_text:
             return None
@@ -685,7 +848,7 @@ class StitchGraphEditorDialog(QDialog):
         self.canvas.set_edges(annotation.get("edges", []))
         self.lbl_current_name.setText(item.image_path.name)
         self.lbl_index.setText(f"{index + 1} / {len(self.folder_items)}")
-        self.status_label.setText(f"已加载 {item.image_path.name}")
+        self._apply_mode_status_style(self.canvas.mode)
 
     def reload_current_item(self):
         if self.current_index < 0 or not self.folder_items:
@@ -721,7 +884,7 @@ class StitchGraphEditorDialog(QDialog):
         annotation["edges"] = normalize_edges(self.canvas.edges)
         annotation["segments"] = []
         annotation["metadata"] = {
-            "source": "img_tools_edge_editor",
+            "source": "img_tools_point_edge_editor",
             "origin_json": str(item.source_json_path) if item.source_json_path is not None else None,
             "point_count": len(annotation["points"]),
             "edge_count": len(annotation["edges"]),
@@ -748,7 +911,7 @@ class StitchGraphEditorDialog(QDialog):
         self.current_annotation = payload
         self.current_output_path = output_path
         if not silent:
-            self.status_label.setText(f"已保存: {output_path}")
+            self._set_status_message(f"已保存: {output_path}")
         return True
 
     def _auto_save_current(self):

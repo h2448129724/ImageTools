@@ -40,4 +40,11 @@ Thumbs.db
 .mypy_cache/
 .coverage
 htmlcov/
-.trash
+
+# Local trash and generated review outputs
+.trash/
+
+# CAB-F local smoke / dataset artifacts
+# Keep these files on disk, but never track them in Git.
+/_cabf_smoke/
+/_cabf_smoke/**

@@ -29,6 +29,7 @@ from gui.training_monitor import TrainingMonitorDialog
 from gui.training_results import TrainingResultsDialog
 from gui.stitch_graph_editor import StitchGraphEditorDialog
 from gui.stitch_point_filter import StitchPointFilterDialog
+from gui.cabf_dataset_tool import CabfDatasetToolDialog
 
 from utils.helpers import get_image_files, ensure_dir, get_output_path
 
@@ -273,6 +274,8 @@ class MainWindow(QMainWindow):
         stitch_editor_act.triggered.connect(self._show_stitch_point_editor)
         stitch_filter_act = tools_menu.addAction("CAB-F 缝纫点数据筛选")
         stitch_filter_act.triggered.connect(self._show_stitch_point_filter)
+        cabf_dataset_act = tools_menu.addAction("CAB-F 数据集校验与导出")
+        cabf_dataset_act.triggered.connect(self._show_cabf_dataset_tool)
 
         # Help menu
         help_menu = menubar.addMenu("帮助(&H)")
@@ -879,6 +882,10 @@ class MainWindow(QMainWindow):
 
     def _show_stitch_point_filter(self):
         dlg = StitchPointFilterDialog(self)
+        dlg.exec()
+
+    def _show_cabf_dataset_tool(self):
+        dlg = CabfDatasetToolDialog(self)
         dlg.exec()
 
     # ---- Worker helpers ----

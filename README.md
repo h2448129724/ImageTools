@@ -17,6 +17,24 @@ python main.py
 imagetools --help
 ```
 
+## CAB-F 数据流程
+
+CAB-F 相关的数据生产、校验、导出规则已经单独固化到下面两份文档：
+
+- [docs/CABF_DATASET_SOP.md](docs/CABF_DATASET_SOP.md)
+- [docs/CABF_MASTER_SCHEMA.md](docs/CABF_MASTER_SCHEMA.md)
+
+其中：
+
+- `CABF_DATASET_SOP.md` 规定了旧数据迁移、新数据入库、模型预标 + 人工修正的标准流程
+- `CABF_MASTER_SCHEMA.md` 固定了 `points + edges + metadata` 母格式以及当前版本 `1.2`
+
+GUI 入口：
+
+- `工具 -> CAB-F 连边标注器`
+- `工具 -> CAB-F 缝纫点数据筛选`
+- `工具 -> CAB-F 数据集校验与导出`
+
 ## CLI 命令
 
 ```bash

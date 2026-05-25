@@ -17,6 +17,7 @@ from core.commands.training_commands import (
 )
 from core.commands.format_commands import FormatCommand
 from core.commands.annot_commands import AnnotCommand
+from core.commands.cabf_commands import CabfCommand
 
 __all__ = ["BaseCommand", "CommandRegistry"]
 
@@ -26,7 +27,7 @@ DEFAULT_COMMANDS = [
     SplitCommand, StratifiedSplitCommand, KFoldCommand, AugmentCommand,
     TileCommand, InfoCommand,
     TrainCommand, TrainListCommand, TrainExportCommand,
-    FormatCommand, AnnotCommand,
+    FormatCommand, AnnotCommand, CabfCommand,
 ]
 
 
