@@ -37,6 +37,7 @@ PENDING_POINT_COLOR = QColor(255, 255, 255)
 EDGE_COLOR = QColor(255, 180, 0)
 DEFAULT_IMAGE_DIR = r"D:\project\changrui\CAB-F\sew_point\images"
 DEFAULT_LABEL_DIR = r"D:\project\changrui\CAB-F\sew_point\train_edge_labeled"
+DEFAULT_OUTPUT_DIR = r"D:\project\changrui\CAB-F\sew_point\train_edge_labeled"
 POINT_LABEL_ALIASES = {"sew", "keypoint"}
 MODE_STATUS_STYLES = {
     "edge": ("当前模式：连边", "background:#fff3cd;color:#856404;border:1px solid #ffe08a;padding:6px;border-radius:4px;"),
@@ -607,9 +608,11 @@ class StitchGraphEditorDialog(QDialog):
         folder_box = QFrame()
         folder_layout = QFormLayout(folder_box)
         self.edit_src_dir = QLineEdit(DEFAULT_IMAGE_DIR)
-        self.edit_out_dir = QLineEdit(DEFAULT_LABEL_DIR)
+        self.edit_label_dir = QLineEdit(DEFAULT_LABEL_DIR)
+        self.edit_output_dir = QLineEdit(DEFAULT_OUTPUT_DIR)
         folder_layout.addRow("图片文件夹", self.edit_src_dir)
-        folder_layout.addRow("标签文件夹", self.edit_out_dir)
+        folder_layout.addRow("标签文件夹", self.edit_label_dir)
+        folder_layout.addRow("输出文件夹", self.edit_output_dir)
         self.check_overwrite_source = QPushButton("直接覆盖原标签：关")
         self.check_overwrite_source.setCheckable(True)
         self.check_overwrite_source.toggled.connect(self._on_toggle_overwrite_source)
@@ -617,9 +620,11 @@ class StitchGraphEditorDialog(QDialog):
         left_layout.addWidget(folder_box)
 
         row_folder = QHBoxLayout()
-        self.btn_choose_src = QPushButton("选择数据文件夹")
+        self.btn_choose_src = QPushButton("选择图片文件夹")
+        self.btn_choose_label = QPushButton("选择标签文件夹")
         self.btn_choose_out = QPushButton("选择输出文件夹")
         row_folder.addWidget(self.btn_choose_src)
+        row_folder.addWidget(self.btn_choose_label)
         row_folder.addWidget(self.btn_choose_out)
         left_layout.addLayout(row_folder)
 
@@ -698,6 +703,7 @@ class StitchGraphEditorDialog(QDialog):
 
     def _connect_signals(self):
         self.btn_choose_src.clicked.connect(self.choose_src_dir)
+        self.btn_choose_label.clicked.connect(self.choose_label_dir)
         self.btn_choose_out.clicked.connect(self.choose_out_dir)
         self.btn_open_folder.clicked.connect(self.open_folder)
         self.btn_reload_current.clicked.connect(self.reload_current_item)
@@ -744,11 +750,11 @@ class StitchGraphEditorDialog(QDialog):
     def _on_toggle_overwrite_source(self, checked: bool):
         self.check_overwrite_source.setText(f"直接覆盖原标签：{'开' if checked else '关'}")
         if checked:
-            self.edit_out_dir.setEnabled(False)
+            self.edit_output_dir.setEnabled(False)
             self.btn_choose_out.setEnabled(False)
             self._set_status_message("已开启直接覆盖原标签。保存时会写回原始 json 或同目录 json。")
         else:
-            self.edit_out_dir.setEnabled(True)
+            self.edit_output_dir.setEnabled(True)
             self.btn_choose_out.setEnabled(True)
             self._apply_mode_status_style(self.canvas.mode)
 
@@ -757,15 +763,20 @@ class StitchGraphEditorDialog(QDialog):
         if path:
             self.edit_src_dir.setText(path)
 
-    def choose_out_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "选择标签文件夹", self.edit_out_dir.text().strip())
+    def choose_label_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "选择标签文件夹", self.edit_label_dir.text().strip())
         if path:
-            self.edit_out_dir.setText(path)
+            self.edit_label_dir.setText(path)
+
+    def choose_out_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "选择输出文件夹", self.edit_output_dir.text().strip())
+        if path:
+            self.edit_output_dir.setText(path)
             self._auto_save_current()
 
     def open_folder(self):
         image_folder = Path(self.edit_src_dir.text().strip())
-        label_folder_text = self.edit_out_dir.text().strip()
+        label_folder_text = self.edit_label_dir.text().strip()
         label_folder = Path(label_folder_text) if label_folder_text else None
         if not image_folder.exists():
             QMessageBox.warning(self, "提示", "图片文件夹不存在。")
@@ -793,7 +804,7 @@ class StitchGraphEditorDialog(QDialog):
             if item.source_json_path is not None:
                 return item.source_json_path
             return item.image_path.with_suffix(".json")
-        out_dir_text = self.edit_out_dir.text().strip()
+        out_dir_text = self.edit_output_dir.text().strip()
         if not out_dir_text:
             return None
         return Path(out_dir_text) / f"{item.stem}.json"
@@ -915,7 +926,7 @@ class StitchGraphEditorDialog(QDialog):
         return True
 
     def _auto_save_current(self):
-        if self.edit_out_dir.text().strip():
+        if self.check_overwrite_source.isChecked() or self.edit_output_dir.text().strip():
             self.save_current_annotation(silent=True)
 
     def keyPressEvent(self, event):
