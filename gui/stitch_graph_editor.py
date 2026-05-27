@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from gui.autosave import AutoSaveStatusController
 
 
 IMAGE_SUFFIXES = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
@@ -591,6 +592,7 @@ class StitchGraphEditorDialog(QDialog):
         self.current_index: int = -1
         self.current_annotation: Optional[dict] = None
         self.current_output_path: Optional[Path] = None
+        self._has_unsaved_changes = False
 
         self._build_ui()
         self._connect_signals()
@@ -694,12 +696,15 @@ class StitchGraphEditorDialog(QDialog):
 
         self.status_label = QLabel("请先加载数据文件夹。")
         left_layout.addWidget(self.status_label)
+        self.save_status_label = QLabel("未修改")
+        left_layout.addWidget(self.save_status_label)
 
         self.canvas = EdgeAnnotationCanvas()
         splitter.addWidget(left)
         splitter.addWidget(self.canvas)
         splitter.setSizes([420, 1180])
         self._set_mode("edge")
+        self.save_state = AutoSaveStatusController(self.save_status_label, self.btn_save)
 
     def _connect_signals(self):
         self.btn_choose_src.clicked.connect(self.choose_src_dir)
@@ -722,7 +727,7 @@ class StitchGraphEditorDialog(QDialog):
         self.canvas.edgeCountChanged.connect(lambda count: self.lbl_edge_count.setText(str(count)))
         self.canvas.pendingChanged.connect(self._on_pending_changed)
         self.canvas.statusMessage.connect(self.status_label.setText)
-        self.canvas.annotationModified.connect(self._auto_save_current)
+        self.canvas.annotationModified.connect(self._on_annotation_modified)
         self._apply_mode_status_style("edge")
 
     def _set_mode(self, mode: str):
@@ -746,6 +751,11 @@ class StitchGraphEditorDialog(QDialog):
 
     def _set_status_message(self, text: str):
         self.status_label.setText(text)
+
+    def _on_annotation_modified(self):
+        self._has_unsaved_changes = True
+        self.save_state.mark_dirty("未保存修改")
+        self._auto_save_current()
 
     def _on_toggle_overwrite_source(self, checked: bool):
         self.check_overwrite_source.setText(f"直接覆盖原标签：{'开' if checked else '关'}")
@@ -854,12 +864,14 @@ class StitchGraphEditorDialog(QDialog):
 
         self.current_annotation = annotation
         self.current_output_path = self._build_output_path(item)
+        self._has_unsaved_changes = False
         self.canvas.set_image(image, image_path=str(item.image_path))
         self.canvas.set_points(annotation.get("points", []))
         self.canvas.set_edges(annotation.get("edges", []))
         self.lbl_current_name.setText(item.image_path.name)
         self.lbl_index.setText(f"{index + 1} / {len(self.folder_items)}")
         self._apply_mode_status_style(self.canvas.mode)
+        self.save_state.mark_pristine("已加载，未修改")
 
     def reload_current_item(self):
         if self.current_index < 0 or not self.folder_items:
@@ -907,20 +919,25 @@ class StitchGraphEditorDialog(QDialog):
             return False
         output_path = self._build_output_path(self.folder_items[self.current_index])
         if output_path is None:
+            self.save_state.mark_dirty("未保存：请先选择输出目录")
             if not silent:
                 QMessageBox.warning(self, "提示", "请先选择输出文件夹。")
             return False
         payload = self._build_current_annotation_payload()
         if payload is None:
             return False
+        self.save_state.mark_saving(auto=silent)
         try:
             save_json(output_path, payload)
         except Exception as exc:
+            self.save_state.mark_error(f"保存失败：{exc}")
             if not silent:
                 QMessageBox.critical(self, "保存失败", str(exc))
             return False
         self.current_annotation = payload
         self.current_output_path = output_path
+        self._has_unsaved_changes = False
+        self.save_state.mark_saved(output_path, auto=silent)
         if not silent:
             self._set_status_message(f"已保存: {output_path}")
         return True

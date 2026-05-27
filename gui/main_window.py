@@ -30,6 +30,9 @@ from gui.training_results import TrainingResultsDialog
 from gui.stitch_graph_editor import StitchGraphEditorDialog
 from gui.stitch_point_filter import StitchPointFilterDialog
 from gui.cabf_dataset_tool import CabfDatasetToolDialog
+from gui.project_tools_hub import ProjectToolEntry, ProjectToolsHubDialog
+from gui.project_tools.models import RegisteredProject
+from gui.project_tools_registry import get_registered_projects
 
 from utils.helpers import get_image_files, ensure_dir, get_output_path
 
@@ -63,6 +66,7 @@ class MainWindow(QMainWindow):
         self._preview_result = None
         self._theme = "light"
         self._runner = RunnerController(self._run_worker, self._log)
+        self._project_tool_registry = get_registered_projects()
         self._setup_ui()
         self._setup_menu()
         self._setup_shortcuts()
@@ -73,14 +77,15 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
         left_panel = self._build_left_panel()
         right_splitter = self._build_right_panel()
         splitter = self._build_main_splitter(left_panel, right_splitter)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(splitter, 1)
+        main_layout.addWidget(self._build_action_bar())
 
         self._setup_status_bar()
         self._connect_panel_signals()
@@ -126,6 +131,48 @@ class MainWindow(QMainWindow):
 
         return left_panel
 
+    def _build_action_bar(self) -> QWidget:
+        action_bar = QWidget()
+        action_bar.setObjectName("actionBar")
+        action_bar.setStyleSheet(
+            "QWidget#actionBar {"
+            "border-top: 1px solid rgba(0, 0, 0, 0.08);"
+            "background: rgba(0, 0, 0, 0.02);"
+            "}"
+        )
+
+        layout = QHBoxLayout(action_bar)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(10)
+
+        label_box = QVBoxLayout()
+        label_box.setSpacing(2)
+        title = QLabel("操作区")
+        title_font = title.font()
+        title_font.setBold(True)
+        title.setFont(title_font)
+        desc = QLabel("把常用动作固定在底部，参数区只负责填写内容。")
+        desc.setStyleSheet("color: #666666; font-size: 12px;")
+        label_box.addWidget(title)
+        label_box.addWidget(desc)
+        layout.addLayout(label_box)
+        layout.addStretch(1)
+
+        self.btn_preview = QPushButton("预览当前图片")
+        self.btn_preview.setToolTip("对当前选中的图片进行预览，结果不保存到磁盘")
+        layout.addWidget(self.btn_preview)
+
+        self.btn_save_result = QPushButton("保存当前结果 (Ctrl+S)")
+        self.btn_save_result.setToolTip("保存当前预览的处理结果到输出目录")
+        self.btn_save_result.setEnabled(False)
+        layout.addWidget(self.btn_save_result)
+
+        self.btn_run = QPushButton("▶ 执行处理 (Ctrl+R)")
+        self.btn_run.setObjectName("btnRun")
+        layout.addWidget(self.btn_run)
+
+        return action_bar
+
     def _build_preview_area(self) -> QWidget:
         """Construct the preview widget with an info bar below it."""
         preview_area = QWidget()
@@ -165,12 +212,12 @@ class MainWindow(QMainWindow):
         log_header.addStretch()
 
         self.btn_clear_log = QPushButton("清空")
-        self.btn_clear_log.setMaximumWidth(50)
+        self.btn_clear_log.setMinimumWidth(64)
         self.btn_clear_log.clicked.connect(self._clear_log)
         log_header.addWidget(self.btn_clear_log)
 
         self.btn_copy_log = QPushButton("复制")
-        self.btn_copy_log.setMaximumWidth(50)
+        self.btn_copy_log.setMinimumWidth(64)
         self.btn_copy_log.clicked.connect(self._copy_log)
         log_header.addWidget(self.btn_copy_log)
 
@@ -221,9 +268,9 @@ class MainWindow(QMainWindow):
         self.input_panel.filesChanged.connect(self._on_files_changed)
         self.function_panel.functionSelected.connect(self._on_function_selected)
         self.function_panel.functionSelected.connect(self.param_panel.set_function)
-        self.param_panel.btn_preview.clicked.connect(self._on_preview)
-        self.param_panel.btn_save_result.clicked.connect(self._on_save_result)
-        self.param_panel.btn_run.clicked.connect(self._on_run)
+        self.btn_preview.clicked.connect(self._on_preview)
+        self.btn_save_result.clicked.connect(self._on_save_result)
+        self.btn_run.clicked.connect(self._on_run)
         self.param_panel.paramsChanged.connect(self._on_params_changed)
         self.preview.original_view.pixelClicked.connect(self._on_preview_pixel_clicked)
         self.preview.polygonCreated.connect(self._on_polygon_created)
@@ -270,12 +317,11 @@ class MainWindow(QMainWindow):
         tools_menu = menubar.addMenu("工具(&T)")
         train_results_act = tools_menu.addAction("YOLO 训练结果管理")
         train_results_act.triggered.connect(self._show_training_results)
-        stitch_editor_act = tools_menu.addAction("CAB-F 连边标注器")
-        stitch_editor_act.triggered.connect(self._show_stitch_point_editor)
-        stitch_filter_act = tools_menu.addAction("CAB-F 缝纫点数据筛选")
-        stitch_filter_act.triggered.connect(self._show_stitch_point_filter)
-        cabf_dataset_act = tools_menu.addAction("CAB-F 数据集校验与导出")
-        cabf_dataset_act.triggered.connect(self._show_cabf_dataset_tool)
+        if self._project_tool_registry:
+            tools_menu.addSeparator()
+            for project in self._project_tool_registry:
+                project_act = tools_menu.addAction(project.menu_title)
+                project_act.triggered.connect(lambda checked=False, project_key=project.key: self._show_project_tools_hub(project_key))
 
         # Help menu
         help_menu = menubar.addMenu("帮助(&H)")
@@ -465,7 +511,7 @@ class MainWindow(QMainWindow):
         self._current_image = self._undo_stack.pop()
         self._preview_result = self._current_image
         self.preview.set_result(self._current_image)
-        self.param_panel.btn_save_result.setEnabled(True)
+        self.btn_save_result.setEnabled(True)
         self._log("撤销")
 
     def _on_redo(self):
@@ -477,7 +523,7 @@ class MainWindow(QMainWindow):
         self._current_image = self._redo_stack.pop()
         self._preview_result = self._current_image
         self.preview.set_result(self._current_image)
-        self.param_panel.btn_save_result.setEnabled(True)
+        self.btn_save_result.setEnabled(True)
         self._log("重做")
 
     def keyPressEvent(self, event):
@@ -526,7 +572,7 @@ class MainWindow(QMainWindow):
         # Reset result tab
         self.preview.set_result(None)
         self._preview_result = None
-        self.param_panel.btn_save_result.setEnabled(False)
+        self.btn_save_result.setEnabled(False)
         self._log(f"已加载: {os.path.basename(path)}")
 
     def _on_preview_pixel_clicked(self, x, y):
@@ -536,13 +582,23 @@ class MainWindow(QMainWindow):
         self._log(f"多边形: {points}")
 
     def _on_roi_selected(self, x1, y1, x2, y2):
-        params = self.param_panel.get_params()["params"]
         w, h = x2 - x1, y2 - y1
+        changed = []
         for name, value in [("x", x1), ("y", y1), ("w", w), ("h", h)]:
-            widget = self.param_panel._widgets.get(name)
-            if widget:
-                widget.setValue(value)
-        self._log(f"框选ROI: ({x1}, {y1}) -> ({x2}, {y2})")
+            if self.param_panel.set_param_value(name, value):
+                changed.append(name)
+        if changed:
+            self.preview.set_roi_apply_feedback(
+                f"ROI 已回填到当前参数：x={x1}, y={y1}, w={w}, h={h}",
+                level="success",
+            )
+            self._log(f"框选ROI并回填参数: ({x1}, {y1}) -> ({x2}, {y2})")
+        else:
+            self.preview.set_roi_apply_feedback(
+                f"已记录 ROI 坐标：x={x1}, y={y1}, w={w}, h={h}。当前功能没有可回填的 x/y/w/h 参数。",
+                level="warning",
+            )
+            self._log(f"框选ROI: ({x1}, {y1}) -> ({x2}, {y2})")
 
     def _on_save_all_rois(self):
         rects = self.preview.get_roi_rects()
@@ -714,7 +770,7 @@ class MainWindow(QMainWindow):
         self._current_image = result
         self._preview_result = result
         self.preview.set_result(result)
-        self.param_panel.btn_save_result.setEnabled(True)
+        self.btn_save_result.setEnabled(True)
 
         if save:
             self._save_preview_result(func_key, params, output_dir)
@@ -741,7 +797,7 @@ class MainWindow(QMainWindow):
             out_path = get_output_path(self._current_file, output_dir,
                                        suffix="_processed", ext=".png")
             write_image(out_path, self._preview_result)
-        self.param_panel.btn_save_result.setEnabled(False)
+        self.btn_save_result.setEnabled(False)
         self._log(f"已保存: {os.path.basename(out_path)}")
         self.lbl_status.setText(f"已保存 - {os.path.basename(out_path)}")
 
@@ -836,7 +892,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda _: self._on_batch_done(len(files)))
         worker.error.connect(self._on_worker_error)
         worker.log.connect(self._log)
-        self.param_panel.btn_run.setEnabled(False)
+        self.btn_run.setEnabled(False)
         self._worker = worker
         worker.start()
 
@@ -846,7 +902,7 @@ class MainWindow(QMainWindow):
 
     def _on_batch_done(self, count):
         self.progress_bar.hide()
-        self.param_panel.btn_run.setEnabled(True)
+        self.btn_run.setEnabled(True)
         self.lbl_status.setText(f"批处理完成 - {count} 个文件")
         self._log(f"批处理完成，处理了 {count} 个文件")
 
@@ -888,12 +944,36 @@ class MainWindow(QMainWindow):
         dlg = CabfDatasetToolDialog(self)
         dlg.exec()
 
+    def _show_project_tools_hub(self, project_key: str):
+        project = next((item for item in self._project_tool_registry if item.key == project_key), None)
+        if project is None:
+            QMessageBox.warning(self, "提示", f"未找到项目工具配置: {project_key}")
+            return
+        tools = self._build_project_tool_entries(project)
+        dlg = ProjectToolsHubDialog(project.display_name, tools, self)
+        dlg.exec()
+
+    def _build_project_tool_entries(self, project: RegisteredProject) -> list[ProjectToolEntry]:
+        entries: list[ProjectToolEntry] = []
+        for tool in project.tools:
+            launch = getattr(self, tool.launcher_name, None)
+            if callable(launch):
+                entries.append(
+                    ProjectToolEntry(
+                        key=tool.key,
+                        title=tool.title,
+                        description=tool.description,
+                        launch=launch,
+                    )
+                )
+        return entries
+
     # ---- Worker helpers ----
     def _run_worker(self, func, on_finish=None):
         self.progress_bar.setRange(0, 0)
         self.progress_bar.show()
         self.lbl_status.setText("处理中...")
-        self.param_panel.btn_run.setEnabled(False)
+        self.btn_run.setEnabled(False)
         self._worker = WorkerThread(func)
         self._worker.finished.connect(lambda r: self._on_worker_done(r, on_finish))
         self._worker.error.connect(self._on_worker_error)
@@ -903,14 +983,14 @@ class MainWindow(QMainWindow):
     def _on_worker_done(self, result, callback=None):
         self.progress_bar.hide()
         self.progress_bar.setRange(0, 100)
-        self.param_panel.btn_run.setEnabled(True)
+        self.btn_run.setEnabled(True)
         self.lbl_status.setText("就绪")
         if callback:
             callback(result)
 
     def _on_worker_error(self, user_msg: str, full_traceback: str = ""):
         self.progress_bar.hide()
-        self.param_panel.btn_run.setEnabled(True)
+        self.btn_run.setEnabled(True)
         self.lbl_status.setText("处理出错")
         self._log(f"错误: {user_msg}")
         if full_traceback:

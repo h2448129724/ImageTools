@@ -97,7 +97,8 @@ QPushButton {{
     color: white;
     border: none;
     border-radius: 4px;
-    padding: 6px 14px;
+    padding: 7px 14px;
+    min-height: 32px;
     font-size: 13px;
 }}
 QPushButton:hover {{
@@ -113,7 +114,8 @@ QPushButton:disabled {{
 QPushButton#btnRun {{
     background-color: {btn_run};
     font-weight: bold;
-    padding: 8px 16px;
+    padding: 9px 18px;
+    min-height: 36px;
 }}
 QPushButton#btnRun:hover {{
     background-color: {btn_run_hover};

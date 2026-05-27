@@ -46,7 +46,7 @@ class RecentFunctionsWidget(QWidget):
 
         self.btn_clear = QPushButton("清空")
         self.btn_clear.setFlat(True)
-        self.btn_clear.setMaximumWidth(40)
+        self.btn_clear.setMinimumWidth(64)
         self.btn_clear.clicked.connect(self.clear_recent)
         header.addWidget(self.btn_clear)
         layout.addLayout(header)

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from gui.autosave import AutoSaveStatusController
 
 
 DEFAULT_COSMOS_ROOT = Path(r"D:\project\changrui\cosmos")
@@ -110,6 +111,7 @@ class PointCanvas(QWidget):
     pointSelectionChanged = Signal(object)
     pointCountChanged = Signal(int)
     statusMessage = Signal(str)
+    annotationModified = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -222,6 +224,7 @@ class PointCanvas(QWidget):
         self.selected_point_id = None
         self.pointSelectionChanged.emit(None)
         self.pointCountChanged.emit(len(self.points))
+        self.annotationModified.emit()
         self.update()
 
     def paintEvent(self, event):
@@ -290,6 +293,7 @@ class PointCanvas(QWidget):
             self.pointSelectionChanged.emit(new_point)
             self.pointCountChanged.emit(len(self.points))
             self.statusMessage.emit(f"已新增点 {new_point['id']}")
+            self.annotationModified.emit()
             self.update()
             return
 
@@ -328,6 +332,7 @@ class PointCanvas(QWidget):
                 point["y"] = float(image_y)
                 point["source"] = "manual"
                 self.pointSelectionChanged.emit(point)
+                self.annotationModified.emit()
                 break
         self.update()
 
@@ -367,6 +372,7 @@ class StitchPointEditorDialog(QDialog):
         self.detector_runner = DetectorRunner()
         self.image_bgr: Optional[np.ndarray] = None
         self.image_path = image_path
+        self._has_unsaved_changes = False
 
         self._build_ui()
         self._connect_signals()
@@ -471,11 +477,14 @@ class StitchPointEditorDialog(QDialog):
 
         self.status_label = QLabel("请选择图片，然后点击“模型出点”。")
         left_layout.addWidget(self.status_label)
+        self.save_status_label = QLabel("未修改")
+        left_layout.addWidget(self.save_status_label)
 
         self.canvas = PointCanvas()
         splitter.addWidget(left)
         splitter.addWidget(self.canvas)
         splitter.setSizes([400, 1100])
+        self.save_state = AutoSaveStatusController(self.save_status_label, self.btn_save)
 
     def _connect_signals(self):
         self.btn_choose_image.clicked.connect(self.choose_image)
@@ -489,6 +498,7 @@ class StitchPointEditorDialog(QDialog):
         self.canvas.pointSelectionChanged.connect(self._on_point_selection_changed)
         self.canvas.pointCountChanged.connect(lambda count: self.lbl_point_count.setText(str(count)))
         self.canvas.statusMessage.connect(self.status_label.setText)
+        self.canvas.annotationModified.connect(self._on_annotation_modified)
 
     def _set_mode(self, mode: str):
         for action, action_mode in self.action_group:
@@ -496,16 +506,23 @@ class StitchPointEditorDialog(QDialog):
         self.canvas.set_mode(mode)
         self.status_label.setText(f"当前模式: {mode}")
 
+    def _on_annotation_modified(self):
+        self._has_unsaved_changes = True
+        self.save_state.mark_dirty("未保存修改")
+        self._auto_save_annotation()
+
     def set_image(self, image_bgr: np.ndarray, image_path: str = ""):
         self.image_bgr = image_bgr.copy()
         self.image_path = image_path
         self.canvas.set_image(self.image_bgr, image_path=image_path)
+        self._has_unsaved_changes = False
         if image_path:
             self.edit_image.setText(image_path)
         if not self.edit_output.text().strip() and image_path:
             image_path_obj = Path(image_path)
             self.edit_output.setText(str(image_path_obj.with_name(f"{image_path_obj.stem}_points_anno.json")))
         self.status_label.setText("图片已加载。")
+        self.save_state.mark_pristine("已加载，未修改")
 
     def use_current_image(self):
         parent = self.parent()
@@ -548,10 +565,14 @@ class StitchPointEditorDialog(QDialog):
         )
         if path:
             self.edit_output.setText(path)
+            self._auto_save_annotation()
 
     def clear_points(self):
         self.canvas.set_points([])
         self.status_label.setText("已清空当前点。")
+        self._has_unsaved_changes = True
+        self.save_state.mark_dirty("未保存修改")
+        self._auto_save_annotation()
 
     def detect_points(self):
         if self.image_bgr is None:
@@ -584,6 +605,9 @@ class StitchPointEditorDialog(QDialog):
         self.canvas.set_points(points)
         self.status_label.setText(f"模型出点完成，共 {len(points)} 个点。")
         self.btn_detect.setEnabled(True)
+        self._has_unsaved_changes = True
+        self.save_state.mark_dirty("未保存修改")
+        self._auto_save_annotation()
 
     def _on_point_selection_changed(self, point):
         if point is None:
@@ -594,13 +618,19 @@ class StitchPointEditorDialog(QDialog):
         self.lbl_xy.setText(f"({point['x']:.1f}, {point['y']:.1f})")
 
     def save_json(self):
+        self._save_annotation(silent=False)
+
+    def _save_annotation(self, silent: bool = True) -> bool:
         if self.image_bgr is None:
-            QMessageBox.warning(self, "提示", "没有可保存的图片上下文。")
-            return
+            if not silent:
+                QMessageBox.warning(self, "提示", "没有可保存的图片上下文。")
+            return False
         output_path = self.edit_output.text().strip()
         if not output_path:
-            QMessageBox.warning(self, "提示", "请先设置输出 JSON 路径。")
-            return
+            self.save_state.mark_dirty("未保存：请先设置输出路径")
+            if not silent:
+                QMessageBox.warning(self, "提示", "请先设置输出 JSON 路径。")
+            return False
 
         sample_id = Path(output_path).stem
         annotation = make_empty_annotation(
@@ -627,5 +657,19 @@ class StitchPointEditorDialog(QDialog):
             "conf": float(self.spin_conf.value()),
             "point_count": len(self.canvas.points),
         }
-        save_annotation_json(output_path, annotation)
+        self.save_state.mark_saving(auto=silent)
+        try:
+            save_annotation_json(output_path, annotation)
+        except Exception as exc:
+            self.save_state.mark_error(f"保存失败：{exc}")
+            if not silent:
+                QMessageBox.critical(self, "保存失败", str(exc))
+            return False
+        self._has_unsaved_changes = False
+        self.save_state.mark_saved(output_path, auto=silent)
         self.status_label.setText(f"已保存: {output_path}")
+        return True
+
+    def _auto_save_annotation(self):
+        if self.edit_output.text().strip():
+            self._save_annotation(silent=True)

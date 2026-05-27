@@ -25,6 +25,7 @@ from core.cabf_dataset import (
     export_master_to_model_a,
     export_master_to_model_b,
     summarize_validation,
+    summarize_validation_findings,
     validate_master_dataset,
     write_json,
 )
@@ -32,10 +33,8 @@ from core.cabf_dataset import (
 
 DEFAULT_MASTER_IMAGE_DIR = r"D:\project\changrui\CAB-F\sew_point_connect\images"
 DEFAULT_MASTER_ANNOTATION_DIR = r"D:\project\changrui\CAB-F\sew_point_connect\annotations"
-DEFAULT_MODEL_A_IMAGE_DIR = r"D:\project\changrui\CAB-F\sew_point_train_export_a\images"
-DEFAULT_MODEL_A_ANNOTATION_DIR = r"D:\project\changrui\CAB-F\sew_point_train_export_a\annotations"
-DEFAULT_MODEL_B_IMAGE_DIR = r"D:\project\changrui\CAB-F\sew_point_connect_export_b\images"
-DEFAULT_MODEL_B_ANNOTATION_DIR = r"D:\project\changrui\CAB-F\sew_point_connect_export_b\annotations"
+DEFAULT_MODEL_A_OUTPUT_DIR = r"D:\project\changrui\CAB-F\sew_point_train_export_a"
+DEFAULT_MODEL_B_OUTPUT_DIR = r"D:\project\changrui\CAB-F\sew_point_connect_export_b"
 DOCS_ROOT = Path(__file__).resolve().parents[1] / "docs"
 SOP_DOC_PATH = DOCS_ROOT / "CABF_DATASET_SOP.md"
 SCHEMA_DOC_PATH = DOCS_ROOT / "CABF_MASTER_SCHEMA.md"
@@ -91,10 +90,7 @@ class CabfDatasetToolDialog(QDialog):
 
         export_a_group = QGroupBox("导出模型 A 训练集（点检测）")
         export_a_form = QFormLayout(export_a_group)
-        self.edit_model_a_image_dir = self._create_path_row(DEFAULT_MODEL_A_IMAGE_DIR, export_a_form, "输出图片目录", True)
-        self.edit_model_a_annotation_dir = self._create_path_row(
-            DEFAULT_MODEL_A_ANNOTATION_DIR, export_a_form, "输出标注目录", True
-        )
+        self.edit_model_a_output_dir = self._create_path_row(DEFAULT_MODEL_A_OUTPUT_DIR, export_a_form, "导出目录", True)
         self.check_model_a_skip_empty = QCheckBox("跳过空标注样本")
         self.check_model_a_skip_empty.setChecked(True)
         export_a_form.addRow("", self.check_model_a_skip_empty)
@@ -102,7 +98,7 @@ class CabfDatasetToolDialog(QDialog):
         btn_export_a = QPushButton("导出模型 A")
         btn_export_a.clicked.connect(self._run_export_model_a)
         btn_open_model_a = QPushButton("打开输出目录")
-        btn_open_model_a.clicked.connect(lambda: self._open_directory(self.edit_model_a_annotation_dir.text().strip()))
+        btn_open_model_a.clicked.connect(lambda: self._open_directory(self.edit_model_a_output_dir.text().strip()))
         export_a_btn_row.addWidget(btn_export_a)
         export_a_btn_row.addWidget(btn_open_model_a)
         export_a_btn_row.addStretch()
@@ -111,10 +107,7 @@ class CabfDatasetToolDialog(QDialog):
 
         export_b_group = QGroupBox("导出模型 B 训练集（连边）")
         export_b_form = QFormLayout(export_b_group)
-        self.edit_model_b_image_dir = self._create_path_row(DEFAULT_MODEL_B_IMAGE_DIR, export_b_form, "输出图片目录", True)
-        self.edit_model_b_annotation_dir = self._create_path_row(
-            DEFAULT_MODEL_B_ANNOTATION_DIR, export_b_form, "输出标注目录", True
-        )
+        self.edit_model_b_output_dir = self._create_path_row(DEFAULT_MODEL_B_OUTPUT_DIR, export_b_form, "导出目录", True)
         self.check_model_b_skip_empty = QCheckBox("跳过空标注样本")
         self.check_model_b_skip_empty.setChecked(True)
         export_b_form.addRow("", self.check_model_b_skip_empty)
@@ -122,7 +115,7 @@ class CabfDatasetToolDialog(QDialog):
         btn_export_b = QPushButton("导出模型 B")
         btn_export_b.clicked.connect(self._run_export_model_b)
         btn_open_model_b = QPushButton("打开输出目录")
-        btn_open_model_b.clicked.connect(lambda: self._open_directory(self.edit_model_b_annotation_dir.text().strip()))
+        btn_open_model_b.clicked.connect(lambda: self._open_directory(self.edit_model_b_output_dir.text().strip()))
         export_b_btn_row.addWidget(btn_export_b)
         export_b_btn_row.addWidget(btn_open_model_b)
         export_b_btn_row.addStretch()
@@ -215,19 +208,9 @@ class CabfDatasetToolDialog(QDialog):
                     brief_report.pop("samples", None)
                     write_json(report_path, brief_report)
             lines = [summarize_validation(report)]
-            if report.get("missing_annotations"):
-                lines.append("missing_annotations:")
-                lines.extend(f"  - {stem}" for stem in report["missing_annotations"])
-            if report.get("orphan_annotations"):
-                lines.append("orphan_annotations:")
-                lines.extend(f"  - {stem}" for stem in report["orphan_annotations"])
-            if self.check_show_samples.isChecked():
-                for sample in report.get("samples", []):
-                    if not sample.get("errors") and not sample.get("warnings"):
-                        continue
-                    lines.append(f"[{sample['sample_id']}]")
-                    lines.extend(f"  error: {issue}" for issue in sample.get("errors", []))
-                    lines.extend(f"  warning: {warning}" for warning in sample.get("warnings", []))
+            findings = summarize_validation_findings(report, include_details=self.check_show_samples.isChecked())
+            if findings:
+                lines.append(findings)
             if report_path:
                 lines.append(f"saved_report: {report_path}")
             self._append_output("\n".join(lines))
@@ -240,12 +223,11 @@ class CabfDatasetToolDialog(QDialog):
             result = export_master_to_model_a(
                 image_dir=image_dir,
                 annotation_dir=annotation_dir,
-                output_image_dir=self.edit_model_a_image_dir.text().strip(),
-                output_annotation_dir=self.edit_model_a_annotation_dir.text().strip(),
+                output_dir=self.edit_model_a_output_dir.text().strip(),
                 include_empty=not self.check_model_a_skip_empty.isChecked(),
             )
             self._append_output("[模型 A 导出]\n" + json.dumps(result, ensure_ascii=False, indent=2))
-            self._open_directory(self.edit_model_a_annotation_dir.text().strip())
+            self._open_directory(self.edit_model_a_output_dir.text().strip())
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 
@@ -255,11 +237,10 @@ class CabfDatasetToolDialog(QDialog):
             result = export_master_to_model_b(
                 image_dir=image_dir,
                 annotation_dir=annotation_dir,
-                output_image_dir=self.edit_model_b_image_dir.text().strip(),
-                output_annotation_dir=self.edit_model_b_annotation_dir.text().strip(),
+                output_dir=self.edit_model_b_output_dir.text().strip(),
                 include_empty=not self.check_model_b_skip_empty.isChecked(),
             )
             self._append_output("[模型 B 导出]\n" + json.dumps(result, ensure_ascii=False, indent=2))
-            self._open_directory(self.edit_model_b_annotation_dir.text().strip())
+            self._open_directory(self.edit_model_b_output_dir.text().strip())
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))

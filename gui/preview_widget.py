@@ -1,7 +1,8 @@
 """Image preview widget with zoom, pan, coordinate picker, and polygon ROI drawing."""
 import json
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                                QScrollArea, QPushButton, QSlider, QTabWidget, QApplication)
+                                QScrollArea, QPushButton, QSlider, QTabWidget, QApplication,
+                                QFrame)
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QMouseEvent, QPainter,
                            QPen, QColor, QBrush, QPolygonF)
@@ -432,9 +433,7 @@ class PreviewPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         layout.addLayout(self._build_zoom_toolbar())
-        layout.addLayout(self._build_picker_toolbar())
-        layout.addLayout(self._build_polygon_toolbar())
-        layout.addLayout(self._build_roi_toolbar())
+        layout.addWidget(self._build_extract_tools_panel())
         layout.addWidget(self._build_tabs())
         self.current_image = None
         self._connect_preview_signals()
@@ -456,20 +455,65 @@ class PreviewPanel(QWidget):
         toolbar.addStretch()
         return toolbar
 
+    def _build_extract_tools_panel(self):
+        panel = QFrame()
+        panel.setObjectName("extractToolsPanel")
+        panel.setStyleSheet(
+            "QFrame#extractToolsPanel {"
+            "background: rgba(0, 0, 0, 0.03);"
+            "border: 1px solid rgba(0, 0, 0, 0.08);"
+            "border-radius: 8px;"
+            "}"
+        )
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("采集工具")
+        title_font = title.font()
+        title_font.setBold(True)
+        title.setFont(title_font)
+        self.extract_mode_label = QLabel("当前模式：未启用")
+        self.extract_mode_label.setStyleSheet("color: #666666; font-weight: bold;")
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.extract_mode_label)
+        layout.addLayout(header)
+
+        help_label = QLabel("坐标拾取用于采样点位；多边形用于轮廓记录；ROI 用于框选区域并可回填到支持 x/y/w/h 的功能参数。")
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet("color: #666666; font-size: 12px;")
+        layout.addWidget(help_label)
+
+        layout.addLayout(self._build_picker_toolbar())
+        layout.addLayout(self._build_polygon_toolbar())
+        layout.addLayout(self._build_roi_toolbar())
+
+        self.roi_apply_label = QLabel("")
+        self.roi_apply_label.setWordWrap(True)
+        self.roi_apply_label.setStyleSheet("color: #666666; font-size: 12px;")
+        layout.addWidget(self.roi_apply_label)
+        return panel
+
     def _build_picker_toolbar(self):
         tools = QHBoxLayout()
+        tools.setSpacing(8)
 
-        self.btn_picker = QPushButton("坐标拾取")
+        section = QLabel("坐标")
+        section.setStyleSheet("font-weight: bold; color: #c0392b;")
+
+        self.btn_picker = QPushButton("开始拾取")
         self.btn_picker.setObjectName("btnPicker")
         self.btn_picker.setCheckable(True)
         self.btn_picker.toggled.connect(self._on_picker_toggled)
 
         self.btn_copy_all = QPushButton("复制所有点")
-        self.btn_copy_all.setMaximumWidth(80)
+        self.btn_copy_all.setMinimumWidth(96)
         self.btn_copy_all.clicked.connect(self._on_copy_all_points)
 
         self.btn_clear_points = QPushButton("清除")
-        self.btn_clear_points.setMaximumWidth(50)
+        self.btn_clear_points.setMinimumWidth(64)
         self.btn_clear_points.clicked.connect(self._on_clear_points)
 
         self.coord_label = QLabel("")
@@ -478,6 +522,7 @@ class PreviewPanel(QWidget):
         self.points_label = QLabel("")
         self.points_label.setStyleSheet("color: #c0392b; font-size: 11px;")
 
+        tools.addWidget(section)
         tools.addWidget(self.btn_picker)
         tools.addWidget(self.btn_copy_all)
         tools.addWidget(self.btn_clear_points)
@@ -488,8 +533,12 @@ class PreviewPanel(QWidget):
 
     def _build_polygon_toolbar(self):
         poly_bar = QHBoxLayout()
+        poly_bar.setSpacing(8)
 
-        self.btn_polygon = QPushButton("多边形绘制")
+        section = QLabel("多边形")
+        section.setStyleSheet("font-weight: bold; color: #27ae60;")
+
+        self.btn_polygon = QPushButton("开始绘制")
         self.btn_polygon.setObjectName("btnPolygon")
         self.btn_polygon.setCheckable(True)
         self.btn_polygon.toggled.connect(self._on_polygon_toggled)
@@ -506,6 +555,7 @@ class PreviewPanel(QWidget):
         self.polygon_info = QLabel("")
         self.polygon_info.setStyleSheet("color: #27ae60; font-weight: bold;")
 
+        poly_bar.addWidget(section)
         poly_bar.addWidget(self.btn_polygon)
         poly_bar.addWidget(self.btn_undo_polygon)
         poly_bar.addWidget(self.btn_clear_polygon)
@@ -516,8 +566,12 @@ class PreviewPanel(QWidget):
 
     def _build_roi_toolbar(self):
         roi_bar = QHBoxLayout()
+        roi_bar.setSpacing(8)
 
-        self.btn_rect_select = QPushButton("框选ROI")
+        section = QLabel("ROI")
+        section.setStyleSheet("font-weight: bold; color: #0078d7;")
+
+        self.btn_rect_select = QPushButton("开始框选")
         self.btn_rect_select.setObjectName("btnRectSelect")
         self.btn_rect_select.setCheckable(True)
         self.btn_rect_select.toggled.connect(self._on_rect_select_toggled)
@@ -538,6 +592,7 @@ class PreviewPanel(QWidget):
         self.roi_info = QLabel("")
         self.roi_info.setStyleSheet("color: #0078d7; font-weight: bold;")
 
+        roi_bar.addWidget(section)
         roi_bar.addWidget(self.btn_rect_select)
         roi_bar.addWidget(self.btn_undo_rect)
         roi_bar.addWidget(self.btn_clear_rect)
@@ -584,6 +639,7 @@ class PreviewPanel(QWidget):
             self.coord_label.setText("")
             self._picked_points.clear()
             self.points_label.setText("")
+        self._update_extract_mode_hint()
 
     def _on_pixel_clicked(self, x, y):
         self._picked_points.append((x, y))
@@ -629,6 +685,7 @@ class PreviewPanel(QWidget):
         self.result_view.polygon_mode = checked
         if not checked:
             self.polygon_info.setText("")
+        self._update_extract_mode_hint()
 
     def _on_polygon_point_added(self, x, y):
         view = self.original_view if self.tabs.currentIndex() == 0 else self.result_view
@@ -684,6 +741,7 @@ class PreviewPanel(QWidget):
         self.result_view.rect_select_mode = checked
         if not checked:
             self._update_roi_info()
+        self._update_extract_mode_hint()
 
     def _on_rect_selected(self, x1, y1, x2, y2):
         view = self.original_view if self.tabs.currentIndex() == 0 else self.result_view
@@ -713,6 +771,7 @@ class PreviewPanel(QWidget):
         self.result_view.clear_all_rects()
         self.btn_rect_select.setChecked(False)
         self.roi_info.setText("")
+        self.roi_apply_label.setText("")
 
     def _on_copy_rois(self):
         view = self.original_view if self.tabs.currentIndex() == 0 else self.result_view
@@ -730,6 +789,29 @@ class PreviewPanel(QWidget):
     def get_roi_rects(self) -> list[tuple[int, int, int, int]]:
         """Return list of (x1, y1, x2, y2) in image coordinates."""
         return list(self.original_view._rects_image)
+
+    def set_roi_apply_feedback(self, text: str, *, level: str = "info") -> None:
+        colors = {
+            "info": "#666666",
+            "success": "#1f7a1f",
+            "warning": "#a15c00",
+        }
+        self.roi_apply_label.setStyleSheet(f"color: {colors.get(level, '#666666')}; font-size: 12px;")
+        self.roi_apply_label.setText(text)
+
+    def _update_extract_mode_hint(self) -> None:
+        if self.btn_picker.isChecked():
+            self.extract_mode_label.setText("当前模式：坐标拾取")
+            self.extract_mode_label.setStyleSheet("color: #c0392b; font-weight: bold;")
+        elif self.btn_polygon.isChecked():
+            self.extract_mode_label.setText("当前模式：多边形绘制")
+            self.extract_mode_label.setStyleSheet("color: #27ae60; font-weight: bold;")
+        elif self.btn_rect_select.isChecked():
+            self.extract_mode_label.setText("当前模式：ROI 框选")
+            self.extract_mode_label.setStyleSheet("color: #0078d7; font-weight: bold;")
+        else:
+            self.extract_mode_label.setText("当前模式：未启用")
+            self.extract_mode_label.setStyleSheet("color: #666666; font-weight: bold;")
 
     # ---- Zoom helpers ----
     def _on_fit(self):

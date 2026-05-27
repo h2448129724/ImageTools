@@ -41,19 +41,7 @@ class ParamPanel(QWidget):
         self._layout = QFormLayout(self._form_container)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._main_layout.addWidget(self._form_container)
-
-        self.btn_preview = QPushButton("预览 (仅当前图片)")
-        self.btn_preview.setToolTip("对当前选中的图片进行预览，结果不保存到磁盘")
-        self._main_layout.addWidget(self.btn_preview)
-
-        self.btn_save_result = QPushButton("保存当前结果 (Ctrl+S)")
-        self.btn_save_result.setToolTip("保存当前预览的处理结果到输出目录")
-        self.btn_save_result.setEnabled(False)
-        self._main_layout.addWidget(self.btn_save_result)
-
-        self.btn_run = QPushButton("▶ 执行处理 (Ctrl+R)")
-        self.btn_run.setObjectName("btnRun")
-        self._main_layout.addWidget(self.btn_run)
+        self._main_layout.addStretch(1)
         self._current_params = {}
         self._container_refs = []  # keep alive container widgets for dir/file pickers
 
@@ -195,3 +183,38 @@ class ParamPanel(QWidget):
     def get_params(self) -> dict[str, Any]:
         self._collect_params()
         return {"function": self._current_key, "params": self._current_params}
+
+    def has_param(self, name: str) -> bool:
+        return name in self._widgets
+
+    def set_param_value(self, name: str, value: Any) -> bool:
+        widget = self._widgets.get(name)
+        if widget is None:
+            return False
+        if isinstance(widget, QSpinBox):
+            widget.setValue(int(value))
+            return True
+        if isinstance(widget, QDoubleSpinBox):
+            widget.setValue(float(value))
+            return True
+        if isinstance(widget, QComboBox):
+            index = widget.findData(value)
+            if index >= 0:
+                widget.setCurrentIndex(index)
+                return True
+            index = widget.findText(str(value))
+            if index >= 0:
+                widget.setCurrentIndex(index)
+                return True
+            return False
+        if isinstance(widget, QCheckBox):
+            widget.setChecked(bool(value))
+            return True
+        if isinstance(widget, QLineEdit):
+            widget.setText(str(value))
+            return True
+        inner = getattr(widget, "_inner_line_edit", None)
+        if inner is not None:
+            inner.setText(str(value))
+            return True
+        return False

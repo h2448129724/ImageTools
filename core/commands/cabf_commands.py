@@ -10,6 +10,7 @@ from core.cabf_dataset import (
     export_master_to_model_a,
     export_master_to_model_b,
     summarize_validation,
+    summarize_validation_findings,
     validate_master_dataset,
     write_json,
 )
@@ -32,15 +33,13 @@ class CabfCommand(BaseCommand):
         p_a = sub.add_parser("export-model-a", help="Export master dataset to point detector training format")
         p_a.add_argument("--image-dir", required=True, help="Master dataset image folder")
         p_a.add_argument("--annotation-dir", required=True, help="Master dataset annotation folder")
-        p_a.add_argument("--output-image-dir", required=True, help="Output image folder")
-        p_a.add_argument("--output-annotation-dir", required=True, help="Output LabelMe point annotation folder")
+        p_a.add_argument("--output-dir", required=True, help="Output root folder; images/annotations/error are created automatically")
         p_a.add_argument("--skip-empty", action="store_true", help="Do not export empty annotations")
 
         p_b = sub.add_parser("export-model-b", help="Export master dataset to edge model training format")
         p_b.add_argument("--image-dir", required=True, help="Master dataset image folder")
         p_b.add_argument("--annotation-dir", required=True, help="Master dataset annotation folder")
-        p_b.add_argument("--output-image-dir", required=True, help="Output image folder")
-        p_b.add_argument("--output-annotation-dir", required=True, help="Output normalized master annotation folder")
+        p_b.add_argument("--output-dir", required=True, help="Output root folder; images/annotations/error are created automatically")
         p_b.add_argument("--skip-empty", action="store_true", help="Do not export empty annotations")
 
     @classmethod
@@ -48,23 +47,9 @@ class CabfCommand(BaseCommand):
         if args.cabf_command == "validate":
             report = validate_master_dataset(args.image_dir, args.annotation_dir)
             print(summarize_validation(report))
-            if report.get("missing_annotations"):
-                print("missing_annotations:")
-                for stem in report["missing_annotations"]:
-                    print(f"  - {stem}")
-            if report.get("orphan_annotations"):
-                print("orphan_annotations:")
-                for stem in report["orphan_annotations"]:
-                    print(f"  - {stem}")
-            if args.show_samples:
-                for sample in report.get("samples", []):
-                    if not sample.get("errors") and not sample.get("warnings"):
-                        continue
-                    print(f"[{sample['sample_id']}]")
-                    for issue in sample.get("errors", []):
-                        print(f"  error: {issue}")
-                    for warning in sample.get("warnings", []):
-                        print(f"  warning: {warning}")
+            findings = summarize_validation_findings(report, include_details=args.show_samples)
+            if findings:
+                print(findings)
             if args.report_path:
                 write_json(args.report_path, report)
                 print(f"saved_report: {args.report_path}")
@@ -74,8 +59,7 @@ class CabfCommand(BaseCommand):
             result = export_master_to_model_a(
                 image_dir=args.image_dir,
                 annotation_dir=args.annotation_dir,
-                output_image_dir=args.output_image_dir,
-                output_annotation_dir=args.output_annotation_dir,
+                output_dir=args.output_dir,
                 include_empty=not args.skip_empty,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -85,8 +69,7 @@ class CabfCommand(BaseCommand):
             result = export_master_to_model_b(
                 image_dir=args.image_dir,
                 annotation_dir=args.annotation_dir,
-                output_image_dir=args.output_image_dir,
-                output_annotation_dir=args.output_annotation_dir,
+                output_dir=args.output_dir,
                 include_empty=not args.skip_empty,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
