@@ -100,6 +100,34 @@ CAB-F/
 
 用缝纫点检测模型生成点预测。
 
+当前标准要求：
+
+- 点预测结果应直接保存为 **CAB-F 母格式**
+- 不再把 LabelMe 点标注作为长期中间真值格式
+- 如果只是为了兼容旧工具链，才临时导出 LabelMe 点标注
+
+推荐命令：
+
+```powershell
+cd D:\project\tianwei\train_model\modules
+
+python -m sew_point.tools.batch_infer `
+  --input_dir <images_dir> `
+  --output_dir <point_prediction_dir> `
+  --model <sew_point_onnx> `
+  --threshold 0.3 `
+  --output_format master
+```
+
+说明：
+
+- `--output_format master` 为当前推荐默认模式
+- 输出 JSON 结构应为：
+  - `points`
+  - `edges`（此阶段为空）
+  - `metadata`
+- `metadata.source` 推荐保留模型来源，例如 `sew_point_batch_infer`
+
 ### 4.3 人工修点
 
 在 `img_tools` 中：
@@ -115,6 +143,30 @@ CAB-F/
 ### 4.4 模型 B 自动出边
 
 基于已确认的点，运行模型 B 预测边。
+
+当前标准要求：
+
+- 输入应为母格式 JSON，且 `points` 已存在
+- 输出仍应保存为母格式 JSON
+- 模型预测得到的边只作为“待审核结果”，不能直接当最终真值
+
+推荐命令：
+
+```powershell
+cd D:\project\tianwei\train_model\modules
+
+python -m sew_point_conntect.batch_predict `
+  --image_dir <images_dir> `
+  --annotation_dir <point_annotation_dir> `
+  --model_path <sew_point_conntect_pth> `
+  --output_annotation_dir <edge_prediction_dir>
+```
+
+说明：
+
+- `annotation_dir` 推荐传入“母格式点标注目录”
+- 预测结果会带上 `edges`
+- `metadata.source` 应标记为类似 `sew_point_conntect_batch_predict`
 
 ### 4.5 人工修边
 
@@ -192,6 +244,12 @@ CAB-F/
 
 它们不能直接覆盖母标注。
 
+补充约定：
+
+- 点预测中间结果推荐存放在 `predictions/points`
+- 边预测中间结果推荐存放在 `predictions/edges`
+- 真值母标注始终只维护在 `master_annotations/annotations`
+
 ---
 
 ## 7. 每次新增数据的固定动作
@@ -206,6 +264,10 @@ CAB-F/
 6. 运行校验
 7. 导出模型 A / 模型 B 训练集
 8. 再进入训练
+
+当前推荐的“正式闭环”是：
+
+`256x256 图片 -> 模型 A 出母格式点 -> 人工修点 -> 模型 B 出母格式边 -> 人工修边 -> 校验 -> 导出 -> 训练`
 
 ---
 
@@ -225,8 +287,38 @@ CAB-F/
 cd D:\project\tianwei\img_tools
 
 python cli.py cabf validate --image-dir <images> --annotation-dir <annotations>
-python cli.py cabf export-model-a --image-dir <images> --annotation-dir <annotations> --output-image-dir <out_images> --output-annotation-dir <out_annotations>
-python cli.py cabf export-model-b --image-dir <images> --annotation-dir <annotations> --output-image-dir <out_images> --output-annotation-dir <out_annotations>
+python cli.py cabf export-model-a --image-dir <images> --annotation-dir <annotations> --output-dir <model_a_export_root>
+python cli.py cabf export-model-b --image-dir <images> --annotation-dir <annotations> --output-dir <model_b_export_root>
+```
+
+导出后目录结构固定为：
+
+```text
+<model_a_export_root>/
+  images/
+  annotations/
+  error/
+
+<model_b_export_root>/
+  images/
+  annotations/
+  error/
+```
+
+训练命令示例：
+
+```powershell
+cd D:\project\tianwei\train_model\modules
+
+python -m sew_point.train `
+  --img_dir <model_a_export_root>\images `
+  --ann_dir <model_a_export_root>\annotations `
+  --save_dir <sew_point_train_out>
+
+python -m sew_point_conntect.train `
+  --image_dir <model_b_export_root>\images `
+  --annotation_dir <model_b_export_root>\annotations `
+  --save_dir <sew_point_conntect_train_out>
 ```
 
 ---
@@ -247,3 +339,9 @@ python cli.py cabf export-model-b --image-dir <images> --annotation-dir <annotat
 - 是否经过人工确认
 
 那么它不应直接进入正式训练集。
+
+补充：
+
+- 当前正式流程以“母格式贯穿”作为默认方案
+- `sew_point` 的批量 `256x256` 小图推理已经可以直接输出母格式
+- 后续维护时，应优先保证所有新样本都先进入母格式，再进入人工审核、导出和训练
