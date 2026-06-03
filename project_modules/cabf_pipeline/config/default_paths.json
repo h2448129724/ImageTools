@@ -1,0 +1,25 @@
+{
+  "img_tools_root": "D:\\project\\tianwei\\img_tools",
+  "train_model_modules_root": "D:\\project\\tianwei\\img_tools\\project_modules\\train_model_modules",
+  "dataset_root": "D:\\project\\changrui\\CAB-F\\sew_point",
+  "pending_filter_dir": "D:\\project\\changrui\\CAB-F\\sew_point\\pending_filter",
+  "filtered_keep_dir": "D:\\project\\changrui\\CAB-F\\sew_point\\filtered_keep",
+  "master_images_dir": "D:\\project\\changrui\\CAB-F\\sew_point\\filtered_keep",
+  "master_annotations_dir": "D:\\project\\changrui\\CAB-F\\sew_point\\master_annotations\\annotations",
+  "point_predictions_dir": "D:\\project\\changrui\\CAB-F\\sew_point\\predictions\\points",
+  "edge_predictions_dir": "D:\\project\\changrui\\CAB-F\\sew_point\\predictions\\edges",
+  "model_a_export_root": "D:\\project\\changrui\\CAB-F\\sew_point\\model_a_export",
+  "model_b_export_root": "D:\\project\\changrui\\CAB-F\\sew_point\\model_b_export",
+  "weights": {
+    "sew_point_onnx": "",
+    "sew_point_connector_pth": ""
+  },
+  "predict": {
+    "point_threshold": "0.30",
+    "point_distance_threshold": "3.00"
+  },
+  "outputs": {
+    "sew_point_train_out": "D:\\project\\changrui\\CAB-F\\runs\\sew_point_train",
+    "sew_point_conntect_train_out": "D:\\project\\changrui\\CAB-F\\runs\\sew_point_conntect_train"
+  }
+}

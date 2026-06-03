@@ -1,0 +1,144 @@
+{
+  "feature_name": "sew_point_conntect",
+  "display_name": "Sew Point Connect",
+  "description": "针点连边模型相关功能，按训练、单样本推理、批量预测拆分。",
+  "preferred_conda_env": "pytorch",
+  "default_project_name": "default",
+  "actions": [
+    {
+      "action_name": "train",
+      "display_name": "训练",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.train"
+      },
+      "output": {
+        "arg_name": "save_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "image_dir",
+          "annotation_dir",
+          "epochs",
+          "batch_size",
+          "lr",
+          "weight_decay",
+          "warmup_epochs",
+          "val_ratio",
+          "seed",
+          "hidden_dim",
+          "num_layers",
+          "dropout",
+          "k_neighbors",
+          "radius_multiplier",
+          "default_spacing",
+          "threshold",
+          "patch_width",
+          "patch_height",
+          "save_dir"
+        ]
+      },
+      "field_overrides": {
+        "image_dir": {
+          "label": "图片目录",
+          "widget": "path"
+        },
+        "annotation_dir": {
+          "label": "标注目录",
+          "widget": "path"
+        },
+        "save_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "infer_single",
+      "display_name": "单样本推理",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.infer"
+      },
+      "output": {
+        "arg_name": "save_path",
+        "use_artifacts_subdir": true,
+        "default_file_name": "result.json"
+      },
+      "field_overrides": {
+        "json_path": {
+          "label": "标注文件",
+          "widget": "path"
+        },
+        "image_path": {
+          "label": "对应图片",
+          "widget": "path"
+        },
+        "model_path": {
+          "label": "模型权重",
+          "widget": "path"
+        },
+        "save_path": {
+          "label": "输出 JSON",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "batch_predict",
+      "display_name": "批量预测",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.batch_predict"
+      },
+      "output": {
+        "arg_name": "output_annotation_dir",
+        "use_artifacts_subdir": true,
+        "extra_outputs": [
+          {
+            "arg_name": "vis_dir"
+          }
+        ]
+      },
+      "ui": {
+        "field_order": [
+          "image_dir",
+          "annotation_dir",
+          "model_path",
+          "output_annotation_dir",
+          "vis_dir",
+          "threshold",
+          "no_compare_gt"
+        ]
+      },
+      "field_overrides": {
+        "image_dir": {
+          "label": "图片目录",
+          "widget": "path"
+        },
+        "annotation_dir": {
+          "label": "标注目录",
+          "widget": "path"
+        },
+        "model_path": {
+          "label": "模型权重",
+          "widget": "path"
+        },
+        "output_annotation_dir": {
+          "label": "输出标注目录",
+          "widget": "path",
+          "default": ""
+        },
+        "vis_dir": {
+          "label": "可视化输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    }
+  ]
+}

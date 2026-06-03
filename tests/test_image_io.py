@@ -7,7 +7,10 @@ import cv2
 import pytest
 from core.image_io import read_image, write_image, resize_image, get_image_info, convert_format
 from core.image_io import _read_exif_orientation, _apply_exif_orientation
-from tests.helpers import _make_test_img
+
+
+def _make_test_img(width: int = 100, height: int = 50, channels: int = 3) -> np.ndarray:
+    return np.random.randint(0, 255, (height, width, channels), dtype=np.uint8)
 
 
 class TestReadWrite:

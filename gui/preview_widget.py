@@ -3,7 +3,7 @@ import json
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                 QScrollArea, QPushButton, QSlider, QTabWidget, QApplication,
                                 QFrame)
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QTimer
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QMouseEvent, QPainter,
                            QPen, QColor, QBrush, QPolygonF)
 import cv2
@@ -39,6 +39,8 @@ class ZoomableLabel(QWidget):
     polygonPointAdded = Signal(int, int)
     polygonClosed = Signal(list)
     rectSelected = Signal(int, int, int, int)  # x1, y1, x2, y2
+    rectsChanged = Signal()
+    rectSelectionChanged = Signal(int)
 
     _CLOSE_DIST = 10  # screen pixels to detect click-near-first-point
 
@@ -69,8 +71,15 @@ class ZoomableLabel(QWidget):
         self._rect_start_image = None
         self._rect_current_screen = None
         self._rects_image = []   # list of (x1, y1, x2, y2) image coords — source of truth
+        self._rect_move_index = -1
+        self._rect_move_anchor = None
+        self._rect_move_origin = None
+        self._rect_resize_index = -1
+        self._rect_resize_corner = ""
+        self._rect_selected_index = -1
+        self._rect_resize_origin = None
 
-        self.setMinimumSize(400, 300)
+        self.setMinimumSize(220, 160)
         self.setMouseTracking(True)
 
     # ---- Picker mode ----
@@ -137,12 +146,28 @@ class ZoomableLabel(QWidget):
 
     def clear_all_rects(self):
         self._rects_image.clear()
+        self._set_selected_rect_index(-1)
+        self.rectsChanged.emit()
         self.update()
 
     def remove_last_rect(self):
         if self._rects_image:
             self._rects_image.pop()
+            if self._rect_selected_index >= len(self._rects_image):
+                self._set_selected_rect_index(len(self._rects_image) - 1)
+            self.rectsChanged.emit()
             self.update()
+
+    def get_roi_rects(self) -> list[tuple[int, int, int, int]]:
+        """Return accumulated ROI rectangles in image coordinates."""
+        return list(self._rects_image)
+
+    def set_selected_rect_index(self, index: int) -> None:
+        if index < 0 or index >= len(self._rects_image):
+            self._set_selected_rect_index(-1)
+        else:
+            self._set_selected_rect_index(index)
+        self.update()
 
     # ---- Geometry ----
     def _screen_to_image(self, sx, sy):
@@ -174,15 +199,96 @@ class ZoomableLabel(QWidget):
         sh = ih * self._zoom
         return sx, sy, sw, sh
 
-    def set_pixmap(self, pixmap):
+    def set_pixmap(self, pixmap, *, preserve_rects: bool = False):
         self._pixmap = pixmap
         self._zoom = 1.0
         self._offset_x = 0
         self._offset_y = 0
         self._marker_point = None
-        self._rects_image.clear()
+        if not preserve_rects:
+            self._rects_image.clear()
+            self._set_selected_rect_index(-1)
+            self.rectsChanged.emit()
         self.fit_to_view()
         self.update()
+
+    def _find_rect_at(self, ix: int, iy: int) -> int:
+        for index in range(len(self._rects_image) - 1, -1, -1):
+            x1, y1, x2, y2 = self._rects_image[index]
+            if x1 <= ix <= x2 and y1 <= iy <= y2:
+                return index
+        return -1
+
+    def _set_selected_rect_index(self, index: int) -> None:
+        if self._rect_selected_index == index:
+            return
+        self._rect_selected_index = index
+        self.rectSelectionChanged.emit(index)
+
+    def _find_rect_corner_at(self, sx: float, sy: float) -> tuple[int, str]:
+        handle_radius = 8
+        corners = ("tl", "tr", "br", "bl")
+        for index in range(len(self._rects_image) - 1, -1, -1):
+            x1, y1, x2, y2 = self._rects_image[index]
+            handle_points = {
+                "tl": self._image_to_screen(x1, y1),
+                "tr": self._image_to_screen(x2, y1),
+                "br": self._image_to_screen(x2, y2),
+                "bl": self._image_to_screen(x1, y2),
+            }
+            for corner in corners:
+                hx, hy = handle_points[corner]
+                if (sx - hx) ** 2 + (sy - hy) ** 2 <= handle_radius ** 2:
+                    return index, corner
+        return -1, ""
+
+    def _clamp_rect_to_image(self, rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        if self._pixmap is None or self._pixmap.isNull():
+            return rect
+        x1, y1, x2, y2 = rect
+        width = x2 - x1
+        height = y2 - y1
+        max_x1 = max(self._pixmap.width() - width, 0)
+        max_y1 = max(self._pixmap.height() - height, 0)
+        x1 = max(0, min(x1, max_x1))
+        y1 = max(0, min(y1, max_y1))
+        return x1, y1, x1 + width, y1 + height
+
+    def _normalize_rect(self, rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        x1, y1, x2, y2 = rect
+        x1, x2 = sorted((x1, x2))
+        y1, y2 = sorted((y1, y2))
+        return x1, y1, x2, y2
+
+    def _resize_rect_to_corner(
+        self,
+        origin: tuple[int, int, int, int],
+        corner: str,
+        ix: int,
+        iy: int,
+    ) -> tuple[int, int, int, int]:
+        x1, y1, x2, y2 = origin
+        min_size = 4
+        if self._pixmap is not None and not self._pixmap.isNull():
+            ix = max(0, min(ix, self._pixmap.width() - 1))
+            iy = max(0, min(iy, self._pixmap.height() - 1))
+        if corner == "tl":
+            x1, y1 = ix, iy
+            x1 = min(x1, x2 - min_size)
+            y1 = min(y1, y2 - min_size)
+        elif corner == "tr":
+            x2, y1 = ix, iy
+            x2 = max(x2, x1 + min_size)
+            y1 = min(y1, y2 - min_size)
+        elif corner == "br":
+            x2, y2 = ix, iy
+            x2 = max(x2, x1 + min_size)
+            y2 = max(y2, y1 + min_size)
+        elif corner == "bl":
+            x1, y2 = ix, iy
+            x1 = min(x1, x2 - min_size)
+            y2 = max(y2, y1 + min_size)
+        return self._normalize_rect((x1, y1, x2, y2))
 
     def fit_to_view(self):
         if self._pixmap is None or self._pixmap.isNull():
@@ -280,7 +386,8 @@ class ZoomableLabel(QWidget):
         ]
         for i, (x1, y1, x2, y2) in enumerate(self._rects_image):
             pen_color, brush_color = colors[i % len(colors)]
-            painter.setPen(QPen(pen_color, 2, Qt.DashLine))
+            selected = i == self._rect_selected_index
+            painter.setPen(QPen(pen_color, 3 if selected else 2, Qt.SolidLine if selected else Qt.DashLine))
             painter.setBrush(QBrush(brush_color))
             rx, ry = self._image_to_screen(x1, y1)
             rw = (x2 - x1) * self._zoom
@@ -288,6 +395,17 @@ class ZoomableLabel(QWidget):
             painter.drawRect(QRectF(rx, ry, rw, rh))
             painter.setPen(QPen(pen_color, 1))
             painter.drawText(QPointF(rx + 3, ry + 14), str(i + 1))
+            if selected:
+                handle_size = 8
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                painter.setPen(QPen(pen_color, 2))
+                for hx, hy in (
+                    self._image_to_screen(x1, y1),
+                    self._image_to_screen(x2, y1),
+                    self._image_to_screen(x2, y2),
+                    self._image_to_screen(x1, y2),
+                ):
+                    painter.drawRect(QRectF(hx - handle_size / 2, hy - handle_size / 2, handle_size, handle_size))
         # Draw current in-progress rect (screen coords, while dragging)
         if self._rect_select_mode and self._rect_drawing and self._rect_start_screen and self._rect_current_screen:
             sx, sy = self._rect_start_screen
@@ -322,10 +440,27 @@ class ZoomableLabel(QWidget):
         if self._rect_select_mode:
             img_coord = self._screen_to_image(pos.x(), pos.y())
             if img_coord:
-                self._rect_drawing = True
-                self._rect_start_screen = (pos.x(), pos.y())
-                self._rect_start_image = img_coord
-                self._rect_current_screen = (pos.x(), pos.y())
+                rect_index, corner = self._find_rect_corner_at(pos.x(), pos.y())
+                if rect_index >= 0:
+                    self._set_selected_rect_index(rect_index)
+                    self._rect_resize_index = rect_index
+                    self._rect_resize_corner = corner
+                    self._rect_resize_origin = self._rects_image[rect_index]
+                    self.setCursor(Qt.SizeFDiagCursor if corner in ("tl", "br") else Qt.SizeBDiagCursor)
+                    return
+                rect_index = self._find_rect_at(*img_coord)
+                if rect_index >= 0:
+                    self._set_selected_rect_index(rect_index)
+                    self._rect_move_index = rect_index
+                    self._rect_move_anchor = img_coord
+                    self._rect_move_origin = self._rects_image[rect_index]
+                    self.setCursor(Qt.SizeAllCursor)
+                else:
+                    self._set_selected_rect_index(-1)
+                    self._rect_drawing = True
+                    self._rect_start_screen = (pos.x(), pos.y())
+                    self._rect_start_image = img_coord
+                    self._rect_current_screen = (pos.x(), pos.y())
             return
 
         if self._polygon_mode:
@@ -347,6 +482,29 @@ class ZoomableLabel(QWidget):
         self.setCursor(Qt.ClosedHandCursor)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._rect_resize_index >= 0 and self._rect_resize_origin and self._rect_resize_corner:
+            pos = event.position()
+            img_coord = self._screen_to_image(pos.x(), pos.y())
+            if img_coord:
+                self._rects_image[self._rect_resize_index] = self._resize_rect_to_corner(
+                    self._rect_resize_origin,
+                    self._rect_resize_corner,
+                    img_coord[0],
+                    img_coord[1],
+                )
+                self.update()
+            return
+        if self._rect_move_index >= 0 and self._rect_move_anchor and self._rect_move_origin:
+            pos = event.position()
+            img_coord = self._screen_to_image(pos.x(), pos.y())
+            if img_coord:
+                dx = img_coord[0] - self._rect_move_anchor[0]
+                dy = img_coord[1] - self._rect_move_anchor[1]
+                x1, y1, x2, y2 = self._rect_move_origin
+                moved = self._clamp_rect_to_image((x1 + dx, y1 + dy, x2 + dx, y2 + dy))
+                self._rects_image[self._rect_move_index] = moved
+                self.update()
+            return
         if self._rect_drawing:
             pos = event.position()
             self._rect_current_screen = (pos.x(), pos.y())
@@ -366,6 +524,28 @@ class ZoomableLabel(QWidget):
                 self.pixelMoved.emit(img_coord[0], img_coord[1])
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._rect_resize_index >= 0:
+            self._rect_resize_index = -1
+            self._rect_resize_corner = ""
+            self._rect_resize_origin = None
+            if self._rect_select_mode:
+                self.setCursor(Qt.CrossCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+            self.rectsChanged.emit()
+            self.update()
+            return
+        if self._rect_move_index >= 0:
+            self._rect_move_index = -1
+            self._rect_move_anchor = None
+            self._rect_move_origin = None
+            if self._rect_select_mode:
+                self.setCursor(Qt.CrossCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+            self.rectsChanged.emit()
+            self.update()
+            return
         if self._rect_drawing and self._rect_start_image:
             pos = event.position()
             end_coord = self._screen_to_image(pos.x(), pos.y())
@@ -376,7 +556,9 @@ class ZoomableLabel(QWidget):
                 x2, y2 = max(ix1, ix2), max(iy1, iy2)
                 if x2 > x1 and y2 > y1:
                     self._rects_image.append((x1, y1, x2, y2))
+                    self._set_selected_rect_index(len(self._rects_image) - 1)
                     self.rectSelected.emit(x1, y1, x2, y2)
+                    self.rectsChanged.emit()
             self._rect_drawing = False
             self.update()
             return
@@ -440,13 +622,17 @@ class PreviewPanel(QWidget):
 
     def _build_zoom_toolbar(self):
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
         self.btn_fit = QPushButton("适应窗口")
         self.btn_fit.clicked.connect(self._on_fit)
         self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setMinimumWidth(44)
         self.btn_zoom_in.clicked.connect(self._on_zoom_in)
         self.btn_zoom_out = QPushButton("-")
+        self.btn_zoom_out.setMinimumWidth(44)
         self.btn_zoom_out.clicked.connect(self._on_zoom_out)
         self.zoom_label = QLabel("100%")
+        self.zoom_label.setStyleSheet("font-size:13px;color:#6B7280;font-weight:600;")
 
         toolbar.addWidget(self.btn_fit)
         toolbar.addWidget(self.btn_zoom_in)
@@ -466,8 +652,8 @@ class PreviewPanel(QWidget):
             "}"
         )
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
 
         header = QHBoxLayout()
         title = QLabel("采集工具")
@@ -484,6 +670,7 @@ class PreviewPanel(QWidget):
         help_label = QLabel("坐标拾取用于采样点位；多边形用于轮廓记录；ROI 用于框选区域并可回填到支持 x/y/w/h 的功能参数。")
         help_label.setWordWrap(True)
         help_label.setStyleSheet("color: #666666; font-size: 12px;")
+        help_label.setMaximumHeight(34)
         layout.addWidget(help_label)
 
         layout.addLayout(self._build_picker_toolbar())
@@ -498,10 +685,10 @@ class PreviewPanel(QWidget):
 
     def _build_picker_toolbar(self):
         tools = QHBoxLayout()
-        tools.setSpacing(8)
+        tools.setSpacing(6)
 
         section = QLabel("坐标")
-        section.setStyleSheet("font-weight: bold; color: #c0392b;")
+        section.setStyleSheet("font-weight: bold; color: #c0392b; min-width: 42px;")
 
         self.btn_picker = QPushButton("开始拾取")
         self.btn_picker.setObjectName("btnPicker")
@@ -509,11 +696,11 @@ class PreviewPanel(QWidget):
         self.btn_picker.toggled.connect(self._on_picker_toggled)
 
         self.btn_copy_all = QPushButton("复制所有点")
-        self.btn_copy_all.setMinimumWidth(96)
+        self.btn_copy_all.setMinimumWidth(112)
         self.btn_copy_all.clicked.connect(self._on_copy_all_points)
 
         self.btn_clear_points = QPushButton("清除")
-        self.btn_clear_points.setMinimumWidth(64)
+        self.btn_clear_points.setMinimumWidth(80)
         self.btn_clear_points.clicked.connect(self._on_clear_points)
 
         self.coord_label = QLabel("")
@@ -533,10 +720,10 @@ class PreviewPanel(QWidget):
 
     def _build_polygon_toolbar(self):
         poly_bar = QHBoxLayout()
-        poly_bar.setSpacing(8)
+        poly_bar.setSpacing(6)
 
         section = QLabel("多边形")
-        section.setStyleSheet("font-weight: bold; color: #27ae60;")
+        section.setStyleSheet("font-weight: bold; color: #27ae60; min-width: 56px;")
 
         self.btn_polygon = QPushButton("开始绘制")
         self.btn_polygon.setObjectName("btnPolygon")
@@ -566,10 +753,10 @@ class PreviewPanel(QWidget):
 
     def _build_roi_toolbar(self):
         roi_bar = QHBoxLayout()
-        roi_bar.setSpacing(8)
+        roi_bar.setSpacing(6)
 
         section = QLabel("ROI")
-        section.setStyleSheet("font-weight: bold; color: #0078d7;")
+        section.setStyleSheet("font-weight: bold; color: #0078d7; min-width: 42px;")
 
         self.btn_rect_select = QPushButton("开始框选")
         self.btn_rect_select.setObjectName("btnRectSelect")
@@ -839,7 +1026,17 @@ class PreviewPanel(QWidget):
         if isinstance(current, ZoomableLabel):
             self.zoom_label.setText(f"{int(current._zoom * 100)}%")
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
+    def _schedule_fit_to_view(self):
+        if not hasattr(self, "_resize_timer"):
+            self._resize_timer = QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._do_fit_to_view)
+        self._resize_timer.start(100)
+
+    def _do_fit_to_view(self):
         self.original_view.fit_to_view()
         self.result_view.fit_to_view()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_fit_to_view()

@@ -13,6 +13,9 @@ from utils.helpers import ensure_dir
 
 logger = logging.getLogger(__name__)
 
+_PNG_MAX_COMPRESSION = 9
+_JPEG_HEADER_SCAN_SIZE = 65536
+
 
 # EXIF orientation tag values → OpenCV transform
 # 1=normal, 2=flip-h, 3=rotate-180, 4=flip-v, 5=transpose, 6=rotate-90-cw,
@@ -137,7 +140,7 @@ def write_image(path: str, img: NDArray[np.uint8], quality: int = 95) -> None:
     if ext in {".jpg", ".jpeg"}:
         params = [cv2.IMWRITE_JPEG_QUALITY, quality]
     elif ext == ".png":
-        params = [cv2.IMWRITE_PNG_COMPRESSION, max(0, min(9, 9 - quality // 11))]
+        params = [cv2.IMWRITE_PNG_COMPRESSION, max(0, min(_PNG_MAX_COMPRESSION, _PNG_MAX_COMPRESSION - quality // 11))]
     elif ext == ".webp":
         params = [cv2.IMWRITE_WEBP_QUALITY, quality]
     else:
@@ -171,7 +174,7 @@ def get_image_info(path: str) -> tuple[int, int, int] | None:
         if header[:2] == b"\xff\xd8":
             # Read up to 64KB — SOF marker is always in the first few KB
             with open(path, "rb") as f:
-                data = bytearray(f.read(65536))
+                data = bytearray(f.read(_JPEG_HEADER_SCAN_SIZE))
             i = 2
             while i < len(data) - 9:
                 if data[i] != 0xFF:

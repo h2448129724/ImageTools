@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPen, QWheelEvent
+from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -29,17 +28,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from gui.autosave import AutoSaveStatusController
+from core.cabf_shared import (
+    IMAGE_SUFFIXES,
+    MASTER_SCHEMA_VERSION,
+    POINT_LABEL_ALIASES,
+    make_empty_master_annotation,
+    normalize_edges_for_editor,
+    normalize_master_annotation,
+    normalize_points_for_editor,
+    read_json as load_json,
+    write_json as save_json,
+)
 
-
-IMAGE_SUFFIXES = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 POINT_COLOR = QColor(80, 255, 80)
 SELECTED_POINT_COLOR = QColor(0, 220, 255)
 PENDING_POINT_COLOR = QColor(255, 255, 255)
 EDGE_COLOR = QColor(255, 180, 0)
-DEFAULT_IMAGE_DIR = r"D:\project\changrui\CAB-F\sew_point\images"
-DEFAULT_LABEL_DIR = r"D:\project\changrui\CAB-F\sew_point\train_edge_labeled"
-DEFAULT_OUTPUT_DIR = r"D:\project\changrui\CAB-F\sew_point\train_edge_labeled"
-POINT_LABEL_ALIASES = {"sew", "keypoint"}
+DEFAULT_IMAGE_DIR = ""
+DEFAULT_LABEL_DIR = ""
+DEFAULT_OUTPUT_DIR = ""
 MODE_STATUS_STYLES = {
     "edge": ("当前模式：连边", "background:#fff3cd;color:#856404;border:1px solid #ffe08a;padding:6px;border-radius:4px;"),
     "add": ("当前模式：新增点", "background:#d1f7d6;color:#176b2c;border:1px solid #8bd8a0;padding:6px;border-radius:4px;"),
@@ -56,66 +63,9 @@ def read_image(image_path) -> np.ndarray:
     return image
 
 
-def load_json(path) -> dict:
-    with Path(path).open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_json(path, data: dict):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def make_empty_annotation(image_path: str, width: int, height: int, sample_id: str):
-    return {
-        "schema_version": "1.1",
-        "sample_id": sample_id,
-        "image_path": image_path,
-        "image_size": {"width": int(width), "height": int(height)},
-        "points": [],
-        "edges": [],
-        "segments": [],
-        "metadata": {},
-    }
-
-
-def load_labelme_points(json_path: Path) -> list[dict]:
-    data = load_json(json_path)
-    shapes = data.get("shapes", []) if isinstance(data, dict) else []
-    points = []
-    next_id = 0
-    for shape in shapes:
-        if not isinstance(shape, dict):
-            continue
-        if shape.get("shape_type") != "point":
-            continue
-        if str(shape.get("label", "")).strip().lower() not in POINT_LABEL_ALIASES:
-            continue
-        raw_points = shape.get("points", [])
-        if not raw_points or len(raw_points[0]) < 2:
-            continue
-        xy = raw_points[0]
-        points.append(
-            {
-                "id": next_id,
-                "x": float(xy[0]),
-                "y": float(xy[1]),
-                "score": float(shape["score"]) if shape.get("score") is not None else 1.0,
-                "source": "labelme_point",
-            }
-        )
-        next_id += 1
-    return points
-
-
 def convert_labelme_json_to_base(json_path: Path, image_path: Path) -> dict:
     data = load_json(json_path)
-    width = int(data.get("imageWidth", 0) or 256)
-    height = int(data.get("imageHeight", 0) or 256)
-    annotation = make_empty_annotation(str(image_path), width, height, image_path.stem)
-    annotation["points"] = load_labelme_points(json_path)
+    annotation, _ = normalize_master_annotation(data, sample_id=image_path.stem, image_path=str(image_path))
     annotation["metadata"] = {
         "source": "labelme_point_folder",
         "origin_json": str(json_path),
@@ -125,42 +75,37 @@ def convert_labelme_json_to_base(json_path: Path, image_path: Path) -> dict:
 
 
 def normalize_points(points: list[dict]) -> list[dict]:
-    normalized = []
-    for idx, point in enumerate(points):
-        normalized.append(
-            {
-                "id": int(point.get("id", idx)),
-                "x": float(point["x"]),
-                "y": float(point["y"]),
-                "score": float(point.get("score", 1.0)),
-                "source": point.get("source", "manual"),
-            }
-        )
-    return normalized
+    return normalize_points_for_editor(points)
 
 
 def normalize_edges(edges: list[dict]) -> list[dict]:
-    normalized = []
-    seen = set()
-    for edge in edges:
-        src = int(edge.get("src", -1))
-        dst = int(edge.get("dst", -1))
-        if src < 0 or dst < 0 or src == dst:
-            continue
-        key = tuple(sorted((src, dst)))
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(
-            {
-                "edge_id": str(edge.get("edge_id") or f"edge_{len(normalized) + 1:04d}"),
-                "src": key[0],
-                "dst": key[1],
-                "label": int(edge.get("label", 1)),
-                "source": edge.get("source", "manual"),
-            }
-        )
-    return normalized
+    return normalize_edges_for_editor(edges)
+
+
+def _merge_annotation_for_editor(base_data: dict, source_data: dict, item: FolderItem) -> dict:
+    """Merge source prediction data into an existing output annotation for editing.
+
+    Priority:
+    - Keep the existing output annotation as the base, so previously corrected points stay intact.
+    - If the base has no points or edges, borrow them from the source prediction file.
+    """
+    annotation = make_empty_master_annotation(str(item.image_path), 256, 256, item.stem)
+    annotation.update(base_data if isinstance(base_data, dict) else {})
+    annotation, _ = normalize_master_annotation(annotation, sample_id=item.stem, image_path=str(item.image_path))
+
+    source = make_empty_master_annotation(str(item.image_path), 256, 256, item.stem)
+    source.update(source_data if isinstance(source_data, dict) else {})
+    source, _ = normalize_master_annotation(source, sample_id=item.stem, image_path=str(item.image_path))
+
+    if not annotation.get("points") and source.get("points"):
+        annotation["points"] = list(source.get("points", []))
+    if not annotation.get("edges") and source.get("edges"):
+        annotation["edges"] = list(source.get("edges", []))
+
+    metadata = dict(annotation.get("metadata", {}))
+    metadata["merged_source_json"] = str(item.source_json_path) if item.source_json_path is not None else None
+    annotation["metadata"] = metadata
+    return annotation
 
 
 @dataclass
@@ -198,7 +143,7 @@ class EdgeAnnotationCanvas(QWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setMinimumSize(840, 620)
+        self.setMinimumSize(560, 420)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.image_bgr: Optional[np.ndarray] = None
@@ -216,6 +161,7 @@ class EdgeAnnotationCanvas(QWidget):
         self.pan_y = 0.0
         self._pan_anchor: Optional[QPoint] = None
         self._drag_point_id: Optional[int] = None
+        self._overlay_visible = True
 
     def set_image(self, image_bgr: np.ndarray, image_path: str = ""):
         self.image_bgr = image_bgr
@@ -259,6 +205,10 @@ class EdgeAnnotationCanvas(QWidget):
             "delete": Qt.ForbiddenCursor,
         }
         self.setCursor(QCursor(cursor_map.get(mode, Qt.ArrowCursor)))
+        self.update()
+
+    def set_overlay_visible(self, visible: bool):
+        self._overlay_visible = bool(visible)
         self.update()
 
     def clear_edges(self):
@@ -411,7 +361,8 @@ class EdgeAnnotationCanvas(QWidget):
         painter.fillRect(self.rect(), QColor("#111111"))
 
         if self.image_qimage is None:
-            painter.setPen(QColor("#ffffff"))
+            painter.setPen(QColor("#9CA3AF"))
+            painter.setFont(QFont("", 14))
             painter.drawText(self.rect(), Qt.AlignCenter, "请先选择数据文件夹")
             return
 
@@ -423,6 +374,9 @@ class EdgeAnnotationCanvas(QWidget):
             int(np.ceil(self.height() / max(self.scale, 1e-6))),
         )
         painter.drawImage(self.rect(), self.image_qimage, src_rect)
+
+        if not self._overlay_visible:
+            return
 
         painter.setPen(QPen(EDGE_COLOR, 2))
         for edge in self.edges:
@@ -461,9 +415,6 @@ class EdgeAnnotationCanvas(QWidget):
             painter.drawEllipse(QPoint(cx, cy), radius, radius)
             painter.setPen(QColor("#ffffff"))
             painter.drawText(cx + 6, cy - 6, str(point_id))
-
-        painter.setPen(QColor(80, 255, 80))
-        painter.drawText(10, 22, f"mode={self.mode} points={len(self.points)} edges={len(self.edges)} zoom={self.scale:.2f}")
 
     def mousePressEvent(self, event):
         if self.image_qimage is None:
@@ -586,7 +537,9 @@ class StitchGraphEditorDialog(QDialog):
     def __init__(self, parent=None, image: Optional[np.ndarray] = None, image_path: str = ""):
         super().__init__(parent)
         self.setWindowTitle("CAB-F 点边一体标注器")
-        self.resize(1600, 960)
+        self.resize(1420, 860)
+        self._left_panel_visible = True
+        self._left_panel_width = 320
 
         self.folder_items: list[FolderItem] = []
         self.current_index: int = -1
@@ -599,13 +552,38 @@ class StitchGraphEditorDialog(QDialog):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Horizontal)
-        root.addWidget(splitter)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(6)
 
-        left = QWidget()
-        left.setMinimumWidth(360)
-        left.setMaximumWidth(460)
-        left_layout = QVBoxLayout(left)
+        topbar = QHBoxLayout()
+        topbar.setSpacing(8)
+        self.btn_toggle_sidebar = QPushButton("收起侧栏")
+        self.btn_toggle_sidebar.setMinimumHeight(34)
+        self.btn_toggle_sidebar.clicked.connect(self._toggle_left_panel)
+        topbar.addWidget(self.btn_toggle_sidebar)
+        self._title_label = QLabel("点边一体标注器")
+        self._title_label.setStyleSheet("font-size:15px;font-weight:700;color:#111827;")
+        topbar.addWidget(self._title_label)
+        self._title_desc = QLabel("直接修点和修边，默认按当前文件夹顺序处理。")
+        self._title_desc.setStyleSheet("font-size:11px;color:#6B7280;")
+        topbar.addWidget(self._title_desc)
+        self.btn_toggle_overlay = QPushButton("隐藏标签")
+        self.btn_toggle_overlay.setCheckable(True)
+        self.btn_toggle_overlay.setChecked(True)
+        self.btn_toggle_overlay.setMinimumHeight(34)
+        topbar.addWidget(self.btn_toggle_overlay)
+        topbar.addStretch(1)
+        root.addLayout(topbar)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        root.addWidget(self.splitter)
+
+        self.left_panel = QWidget()
+        self.left_panel.setMinimumWidth(260)
+        self.left_panel.setMaximumWidth(360)
+        left_layout = QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
 
         folder_box = QFrame()
         folder_layout = QFormLayout(folder_box)
@@ -622,6 +600,7 @@ class StitchGraphEditorDialog(QDialog):
         left_layout.addWidget(folder_box)
 
         row_folder = QHBoxLayout()
+        row_folder.setSpacing(8)
         self.btn_choose_src = QPushButton("选择图片文件夹")
         self.btn_choose_label = QPushButton("选择标签文件夹")
         self.btn_choose_out = QPushButton("选择输出文件夹")
@@ -631,6 +610,7 @@ class StitchGraphEditorDialog(QDialog):
         left_layout.addLayout(row_folder)
 
         row_open = QHBoxLayout()
+        row_open.setSpacing(8)
         self.btn_open_folder = QPushButton("加载文件夹")
         self.btn_reload_current = QPushButton("重新读取当前图")
         row_open.addWidget(self.btn_open_folder)
@@ -654,6 +634,7 @@ class StitchGraphEditorDialog(QDialog):
         left_layout.addWidget(nav_box)
 
         row_nav = QHBoxLayout()
+        row_nav.setSpacing(8)
         self.btn_prev = QPushButton("上一张")
         self.btn_next = QPushButton("下一张")
         self.btn_save = QPushButton("保存当前")
@@ -663,6 +644,7 @@ class StitchGraphEditorDialog(QDialog):
         left_layout.addLayout(row_nav)
 
         row_edge = QHBoxLayout()
+        row_edge.setSpacing(8)
         self.btn_undo_edge = QPushButton("撤销上一条边")
         self.btn_clear_edges = QPushButton("清空所有边")
         row_edge.addWidget(self.btn_undo_edge)
@@ -670,6 +652,7 @@ class StitchGraphEditorDialog(QDialog):
         left_layout.addLayout(row_edge)
 
         row_mode = QHBoxLayout()
+        row_mode.setSpacing(6)
         self.btn_mode_edge = QPushButton("连边模式")
         self.btn_mode_add = QPushButton("新增点")
         self.btn_mode_move = QPushButton("移动点")
@@ -680,18 +663,15 @@ class StitchGraphEditorDialog(QDialog):
         left_layout.addLayout(row_mode)
 
         self.file_list = QListWidget()
+        self.file_list.setMaximumHeight(220)
         left_layout.addWidget(self.file_list, 1)
 
         self.lbl_help = QLabel(
-            "使用方式\n"
-            "1. 分别选择图片文件夹和标签文件夹\n"
-            "2. 程序会按同名文件匹配图片和 json，并把点显示到图上\n"
-            "3. 连边模式下，左键点两个点即可添加或取消一条边\n"
-            "4. 新增点/移动点/删点模式用于修正缝纫点\n"
-            "5. Shift+左键可连续串边，右键取消当前起点或平移\n"
-            "6. A/D 切图，S 保存，+/- 缩放"
+            "快捷说明\n"
+            "左键连边 / Shift 连续串边 / 右键取消或平移 / A D 切图 / S 保存 / H 显隐标签 / +/- 缩放"
         )
         self.lbl_help.setWordWrap(True)
+        self.lbl_help.setStyleSheet("color:#6B7280;font-size:11px;")
         left_layout.addWidget(self.lbl_help)
 
         self.status_label = QLabel("请先加载数据文件夹。")
@@ -700,9 +680,9 @@ class StitchGraphEditorDialog(QDialog):
         left_layout.addWidget(self.save_status_label)
 
         self.canvas = EdgeAnnotationCanvas()
-        splitter.addWidget(left)
-        splitter.addWidget(self.canvas)
-        splitter.setSizes([420, 1180])
+        self.splitter.addWidget(self.left_panel)
+        self.splitter.addWidget(self.canvas)
+        self.splitter.setSizes([320, 1100])
         self._set_mode("edge")
         self.save_state = AutoSaveStatusController(self.save_status_label, self.btn_save)
 
@@ -728,7 +708,30 @@ class StitchGraphEditorDialog(QDialog):
         self.canvas.pendingChanged.connect(self._on_pending_changed)
         self.canvas.statusMessage.connect(self.status_label.setText)
         self.canvas.annotationModified.connect(self._on_annotation_modified)
+        self.btn_toggle_overlay.toggled.connect(self._toggle_overlay_visibility)
         self._apply_mode_status_style("edge")
+
+    def _toggle_left_panel(self):
+        if self._left_panel_visible:
+            self._left_panel_width = max(self.splitter.sizes()[0], 260)
+            self.left_panel.hide()
+            self.splitter.setSizes([0, 1])
+            self.btn_toggle_sidebar.setText("展开侧栏")
+            self._left_panel_visible = False
+            return
+
+        self.left_panel.show()
+        self.splitter.setSizes([self._left_panel_width, max(self.width() - self._left_panel_width, 1)])
+        self.btn_toggle_sidebar.setText("收起侧栏")
+        self._left_panel_visible = True
+
+    def _toggle_overlay_visibility(self, checked: bool):
+        self.canvas.set_overlay_visible(checked)
+        self.btn_toggle_overlay.setText("隐藏标签" if checked else "显示标签")
+        if checked:
+            self._set_status_message("已显示标签内容。")
+        else:
+            self._set_status_message("已隐藏标签内容，可查看原图。")
 
     def _set_mode(self, mode: str):
         mapping = {
@@ -784,6 +787,25 @@ class StitchGraphEditorDialog(QDialog):
             self.edit_output_dir.setText(path)
             self._auto_save_current()
 
+    def configure_paths(
+        self,
+        *,
+        image_dir: str = "",
+        label_dir: str = "",
+        output_dir: str = "",
+        overwrite_source: bool = False,
+        auto_open: bool = True,
+    ) -> None:
+        if image_dir:
+            self.edit_src_dir.setText(image_dir)
+        if label_dir:
+            self.edit_label_dir.setText(label_dir)
+        if output_dir:
+            self.edit_output_dir.setText(output_dir)
+        self.check_overwrite_source.setChecked(overwrite_source)
+        if auto_open and image_dir and label_dir and Path(image_dir).is_dir() and Path(label_dir).is_dir():
+            self.open_folder()
+
     def open_folder(self):
         image_folder = Path(self.edit_src_dir.text().strip())
         label_folder_text = self.edit_label_dir.text().strip()
@@ -823,25 +845,30 @@ class StitchGraphEditorDialog(QDialog):
         output_path = self._build_output_path(item)
         if output_path is not None and output_path.exists():
             data = load_json(output_path)
-            annotation = make_empty_annotation(str(item.image_path), 256, 256, item.stem)
+            if item.source_json_path is not None and item.source_json_path.exists():
+                try:
+                    source_data = load_json(item.source_json_path)
+                except Exception:
+                    source_data = None
+                if isinstance(data, dict) and isinstance(source_data, dict):
+                    return _merge_annotation_for_editor(data, source_data, item)
+
+            annotation = make_empty_master_annotation(str(item.image_path), 256, 256, item.stem)
             annotation.update(data if isinstance(data, dict) else {})
-            annotation["points"] = normalize_points(annotation.get("points", []))
-            annotation["edges"] = normalize_edges(annotation.get("edges", []))
+            annotation, _ = normalize_master_annotation(annotation, sample_id=item.stem, image_path=str(item.image_path))
             return annotation
 
         if item.source_json_path is not None and item.source_json_path.exists():
             data = load_json(item.source_json_path)
             if isinstance(data, dict) and "points" in data:
-                annotation = make_empty_annotation(str(item.image_path), 256, 256, item.stem)
+                annotation = make_empty_master_annotation(str(item.image_path), 256, 256, item.stem)
                 annotation.update(data)
-                annotation["points"] = normalize_points(annotation.get("points", []))
-                annotation["edges"] = normalize_edges(annotation.get("edges", []))
-                annotation["image_path"] = str(item.image_path)
+                annotation, _ = normalize_master_annotation(annotation, sample_id=item.stem, image_path=str(item.image_path))
                 return annotation
             return convert_labelme_json_to_base(item.source_json_path, item.image_path)
 
         image = read_image(item.image_path)
-        return make_empty_annotation(str(item.image_path), image.shape[1], image.shape[0], item.stem)
+        return make_empty_master_annotation(str(item.image_path), image.shape[1], image.shape[0], item.stem)
 
     def jump_to_index(self, index: int):
         if not self.folder_items:
@@ -855,13 +882,34 @@ class StitchGraphEditorDialog(QDialog):
         self.file_list.setCurrentRow(index)
         self.file_list.blockSignals(False)
         item = self.folder_items[index]
-        try:
-            image = read_image(item.image_path)
-            annotation = self._load_annotation_for_item(item)
-        except Exception as exc:
-            QMessageBox.critical(self, "加载失败", str(exc))
-            return
+        self.status_label.setText("加载中...")
+        self.setEnabled(False)
 
+        class _LoadWorker(QThread):
+            done = Signal(object, object)
+            error = Signal(str)
+
+            def __init__(self, it):
+                super().__init__()
+                self._item = it
+
+            def run(self):
+                try:
+                    image = read_image(self._item.image_path)
+                    annotation = self._load_annotation_for_item(self._item)
+                    self.done.emit(image, annotation)
+                except Exception as exc:
+                    self.error.emit(str(exc))
+
+        w = _LoadWorker(item)
+        w._load_annotation_for_item = self._load_annotation_for_item
+        w.done.connect(lambda img, ann: self._on_jump_done(img, ann, item, index))
+        w.error.connect(lambda msg: (self.setEnabled(True), QMessageBox.critical(self, "加载失败", msg), self.status_label.setText("加载失败")))
+        w.start()
+        self._load_worker = w
+
+    def _on_jump_done(self, image, annotation, item, index):
+        self.setEnabled(True)
         self.current_annotation = annotation
         self.current_output_path = self._build_output_path(item)
         self._has_unsaved_changes = False
@@ -897,7 +945,7 @@ class StitchGraphEditorDialog(QDialog):
         image = self.canvas.image_bgr
         if image is None:
             return None
-        annotation = make_empty_annotation(
+        annotation = make_empty_master_annotation(
             image_path=str(item.image_path),
             width=int(image.shape[1]),
             height=int(image.shape[0]),
@@ -957,6 +1005,10 @@ class StitchGraphEditorDialog(QDialog):
             return
         if event.key() == Qt.Key_S:
             self.save_current_annotation(silent=False)
+            event.accept()
+            return
+        if event.key() == Qt.Key_H:
+            self.btn_toggle_overlay.toggle()
             event.accept()
             return
         if event.key() in (Qt.Key_Plus, Qt.Key_Equal):

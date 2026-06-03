@@ -7,14 +7,18 @@ from typing import Callable, Sequence
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
+from gui.tools.base import make_page_header
 
 
 @dataclass(frozen=True)
@@ -40,84 +44,63 @@ class ProjectToolsHubDialog(QDialog):
         self.resize(860, 520)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
+        root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
 
-        header = QLabel(f"{self._project_name} 工具中心")
-        font = header.font()
-        font.setBold(True)
-        font.setPointSize(font.pointSize() + 2)
-        header.setFont(font)
-        root.addWidget(header)
-
-        intro = QLabel("左侧选择具体功能，右侧查看说明并打开对应工具。这个入口也可以继续扩展到其他项目。")
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color: #666;")
-        root.addWidget(intro)
+        hero = make_page_header(
+            f"{self._project_name} 工具中心",
+            "集中放置当前项目的扩展工具入口，保持和主工具一致的轻量风格。",
+        )
+        self.meta_label = QLabel("")
+        self.meta_label.setStyleSheet("color:#334155;font-size:12px;")
+        hero.layout().addWidget(self.meta_label)
+        root.addWidget(hero)
 
         content = QHBoxLayout()
-        content.setSpacing(12)
+        content.setSpacing(10)
         root.addLayout(content, 1)
 
-        self.tool_list = QListWidget()
-        self.tool_list.setMinimumWidth(240)
-        self.tool_list.currentRowChanged.connect(self._on_tool_changed)
-        content.addWidget(self.tool_list, 0)
-
-        detail_panel = QWidget()
-        detail_layout = QVBoxLayout(detail_panel)
-        detail_layout.setContentsMargins(12, 12, 12, 12)
-        detail_layout.setSpacing(10)
-        detail_panel.setStyleSheet("background: rgba(0, 0, 0, 0.03); border-radius: 8px;")
-        content.addWidget(detail_panel, 1)
-
-        self.title_label = QLabel("")
-        title_font = self.title_label.font()
-        title_font.setBold(True)
-        title_font.setPointSize(title_font.pointSize() + 1)
-        self.title_label.setFont(title_font)
-        detail_layout.addWidget(self.title_label)
-
-        self.desc_label = QLabel("")
-        self.desc_label.setWordWrap(True)
-        self.desc_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        detail_layout.addWidget(self.desc_label, 1)
-
-        detail_layout.addStretch()
-
-        button_row = QHBoxLayout()
-        button_row.addStretch()
-        self.open_btn = QPushButton("打开工具")
-        self.open_btn.clicked.connect(self._open_current_tool)
-        button_row.addWidget(self.open_btn)
-        detail_layout.addLayout(button_row)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        grid_widget = QWidget()
+        self._grid_layout = QGridLayout(grid_widget)
+        self._grid_layout.setSpacing(10)
+        self._grid_layout.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(grid_widget)
+        content.addWidget(scroll, 1)
 
     def _populate_tools(self) -> None:
-        self.tool_list.clear()
-        for tool in self._tools:
-            item = QListWidgetItem(tool.title)
-            item.setData(Qt.UserRole, tool.key)
-            self.tool_list.addItem(item)
+        cols = 2
+        for i, tool in enumerate(self._tools):
+            card = QFrame()
+            card.setStyleSheet(
+                "QFrame{background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;}"
+                "QFrame:hover{border-color:#2563EB;background:#f8fbff;}"
+            )
+            card.setCursor(Qt.PointingHandCursor)
+            lay = QVBoxLayout(card)
+            lay.setContentsMargins(14, 12, 14, 12)
+            lay.setSpacing(4)
+
+            title = QLabel(tool.title)
+            title.setStyleSheet("color:#0f172a;font-size:16px;font-weight:700;")
+            lay.addWidget(title)
+
+            desc = QLabel(tool.description)
+            desc.setWordWrap(True)
+            desc.setStyleSheet("color:#64748b;font-size:13px;line-height:1.5;")
+            lay.addWidget(desc, 1)
+
+            btn = QPushButton("打开")
+            btn.setFixedWidth(72)
+            btn.clicked.connect(lambda checked=False, t=tool: t.launch())
+            lay.addWidget(btn, 0, Qt.AlignRight)
+
+            row, col = divmod(i, cols)
+            self._grid_layout.addWidget(card, row, col)
+
         if self._tools:
-            self.tool_list.setCurrentRow(0)
+            self.meta_label.setText(f"已注册 {len(self._tools)} 个可用工具。")
         else:
-            self.title_label.setText("暂无工具")
-            self.desc_label.setText("这个项目目前还没有注册可用工具。")
-            self.open_btn.setEnabled(False)
-
-    def _on_tool_changed(self, row: int) -> None:
-        if row < 0 or row >= len(self._tools):
-            self.title_label.setText("")
-            self.desc_label.setText("")
-            self.open_btn.setEnabled(False)
-            return
-        tool = self._tools[row]
-        self.title_label.setText(tool.title)
-        self.desc_label.setText(tool.description)
-        self.open_btn.setEnabled(True)
-
-    def _open_current_tool(self) -> None:
-        row = self.tool_list.currentRow()
-        if row < 0 or row >= len(self._tools):
-            return
-        self._tools[row].launch()
+            self.meta_label.setText("当前项目暂无已注册工具。")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,10 +10,11 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -31,12 +31,20 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from gui.tools.base import make_card, make_page_header, set_primary
+from core.cabf_shared import (
+    IMAGE_SUFFIXES,
+    load_labelme_points,
+    normalize_edges_for_editor,
+    normalize_master_annotation,
+    normalize_points_for_editor,
+    read_json as load_json,
+)
 
-
-IMAGE_SUFFIXES = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 POINT_COLOR = QColor(80, 255, 80)
-DEFAULT_IMAGE_DIR = r"D:\project\changrui\CAB-F\sew_point\images"
-DEFAULT_LABEL_DIR = r"D:\project\changrui\CAB-F\sew_point\images"
+EDGE_COLOR = QColor(74, 144, 226)
+DEFAULT_IMAGE_DIR = ""
+DEFAULT_LABEL_DIR = ""
 
 
 def read_image(image_path: str | Path) -> np.ndarray:
@@ -45,78 +53,40 @@ def read_image(image_path: str | Path) -> np.ndarray:
     if image is None:
         raise FileNotFoundError(f"无法读取图片: {image_path}")
     return image
-
-
-def load_json(path: str | Path) -> dict:
-    with Path(path).open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
 def normalize_points(points: list[dict]) -> list[dict]:
-    normalized = []
-    for idx, point in enumerate(points):
-        if "x" not in point or "y" not in point:
-            continue
-        normalized.append(
-            {
-                "id": int(point.get("id", idx)),
-                "x": float(point["x"]),
-                "y": float(point["y"]),
-                "score": float(point.get("score", 1.0)),
-                "source": point.get("source", "manual"),
-            }
-        )
-    return normalized
+    return [point for point in normalize_points_for_editor(points) if "x" in point and "y" in point]
 
 
-def load_labelme_points(json_path: Path) -> list[dict]:
+def load_annotation_from_json(json_path: Path) -> tuple[list[dict], list[dict]]:
     data = load_json(json_path)
-    shapes = data.get("shapes", []) if isinstance(data, dict) else []
-    points = []
-    next_id = 0
-    for shape in shapes:
-        if not isinstance(shape, dict):
-            continue
-        if shape.get("shape_type") != "point":
-            continue
-        label = str(shape.get("label", "")).strip().lower()
-        if label and label not in {"sew", "keypoint"}:
-            continue
-        raw_points = shape.get("points", [])
-        if not raw_points or len(raw_points[0]) < 2:
-            continue
-        xy = raw_points[0]
-        points.append(
-            {
-                "id": next_id,
-                "x": float(xy[0]),
-                "y": float(xy[1]),
-                "score": float(shape["score"]) if shape.get("score") is not None else 1.0,
-                "source": "labelme_point",
-            }
-        )
-        next_id += 1
-    return points
-
-
-def load_points_from_json(json_path: Path) -> list[dict]:
-    data = load_json(json_path)
-    if isinstance(data, dict) and isinstance(data.get("points"), list):
-        return normalize_points(data.get("points", []))
-    return load_labelme_points(json_path)
+    if isinstance(data, dict) and (isinstance(data.get("points"), list) or isinstance(data.get("edges"), list)):
+        normalized, _ = normalize_master_annotation(data, sample_id=json_path.stem, image_path=f"{json_path.stem}.png")
+        points = normalize_points(normalized.get("points", []))
+        edges = normalize_edges_for_editor(normalized.get("edges", []))
+        return points, edges
+    return normalize_points(load_labelme_points(data)), []
 
 
 @dataclass
 class FilterItem:
     image_path: Path
-    label_path: Path
+    label_path: Optional[Path] = None
 
     @property
     def stem(self) -> str:
         return self.image_path.stem
 
+    @property
+    def has_label(self) -> bool:
+        return self.label_path is not None
 
-def collect_filter_items(image_dir: Path, label_dir: Optional[Path] = None) -> list[FilterItem]:
+
+def collect_filter_items(
+    image_dir: Path,
+    label_dir: Optional[Path] = None,
+    *,
+    require_label: bool = True,
+) -> list[FilterItem]:
     label_root = label_dir or image_dir
     items: list[FilterItem] = []
     for path in sorted(image_dir.iterdir()):
@@ -125,6 +95,8 @@ def collect_filter_items(image_dir: Path, label_dir: Optional[Path] = None) -> l
         label_path = label_root / f"{path.stem}.json"
         if label_path.exists() and label_path.is_file():
             items.append(FilterItem(image_path=path, label_path=label_path))
+        elif not require_label:
+            items.append(FilterItem(image_path=path, label_path=None))
     return items
 
 
@@ -159,9 +131,9 @@ def move_file_safe(source: Path, dest_dir: Path) -> Path:
     return target
 
 
-def move_item_pair(item: FilterItem, dest_dir: Path) -> tuple[Path, Path]:
+def move_item_files(item: FilterItem, dest_dir: Path) -> tuple[Path, Optional[Path]]:
     moved_image = move_file_safe(item.image_path, dest_dir)
-    moved_label = move_file_safe(item.label_path, dest_dir)
+    moved_label = move_file_safe(item.label_path, dest_dir) if item.label_path else None
     return moved_image, moved_label
 
 
@@ -177,19 +149,21 @@ class PointFilterCanvas(QWidget):
         self.image_rgb: Optional[np.ndarray] = None
         self.image_qimage: Optional[QImage] = None
         self.points: list[dict] = []
+        self.edges: list[dict] = []
 
         self.scale = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
         self._pan_anchor: Optional[QPoint] = None
 
-    def set_data(self, image_bgr: np.ndarray, points: list[dict]):
+    def set_data(self, image_bgr: np.ndarray, points: list[dict], edges: Optional[list[dict]] = None):
         self.image_bgr = image_bgr
         self.image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         height, width = self.image_rgb.shape[:2]
         bytes_per_line = width * 3
         self.image_qimage = QImage(self.image_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
         self.points = normalize_points(points)
+        self.edges = normalize_edges_for_editor(edges or [])
         self.fit_view()
 
     def fit_view(self):
@@ -246,6 +220,18 @@ class PointFilterCanvas(QWidget):
             int(round(target.height() / max(self.scale, 1e-6))),
         )
         painter.drawImage(target, self.image_qimage, source)
+
+        point_lookup = {int(point["id"]): point for point in self.points}
+        edge_pen = QPen(EDGE_COLOR, max(1, int(round(2 * self.scale))))
+        painter.setPen(edge_pen)
+        for edge in self.edges:
+            src = point_lookup.get(int(edge.get("src", -1)))
+            dst = point_lookup.get(int(edge.get("dst", -1)))
+            if src is None or dst is None:
+                continue
+            x1, y1 = self._image_to_canvas(src["x"], src["y"])
+            x2, y2 = self._image_to_canvas(dst["x"], dst["y"])
+            painter.drawLine(x1, y1, x2, y2)
 
         pen = QPen(POINT_COLOR, 2)
         painter.setPen(pen)
@@ -308,10 +294,12 @@ class PointFilterCanvas(QWidget):
 
 
 class StitchPointFilterDialog(QDialog):
+    applyRequested = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("CAB-F 缝纫点数据筛选")
-        self.resize(1600, 960)
+        self.resize(1480, 900)
 
         self.items: list[FilterItem] = []
         self.current_index: int = -1
@@ -323,21 +311,54 @@ class StitchPointFilterDialog(QDialog):
         self._build_ui()
         self._connect_signals()
 
+    def configure_paths(
+        self,
+        *,
+        mode: str = "unlabeled",
+        image_dir: str = "",
+        label_dir: str = "",
+        save_dir: str = "",
+        auto_load: bool = False,
+    ) -> None:
+        mode_value = "labeled" if str(mode).lower() == "labeled" else "unlabeled"
+        idx = 1 if mode_value == "labeled" else 0
+        self.combo_mode.setCurrentIndex(idx)
+        if image_dir:
+            self.edit_image_dir.setText(image_dir)
+        if label_dir:
+            self.edit_label_dir.setText(label_dir)
+        if save_dir:
+            self.edit_save_dir.setText(save_dir)
+        if auto_load and image_dir:
+            self.open_dataset()
+
     def _build_ui(self):
         root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+        root.addWidget(make_page_header("缝纫点数据筛选", "快速浏览样本，保留有效数据，剔除不需要的图片与标签。"))
+
         splitter = QSplitter(Qt.Horizontal)
         root.addWidget(splitter)
 
         left = QWidget()
         left.setMinimumWidth(360)
-        left.setMaximumWidth(480)
+        left.setMaximumWidth(460)
         left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
 
-        folder_box = QFrame()
+        folder_box = make_card()
         folder_layout = QFormLayout(folder_box)
+        folder_layout.setContentsMargins(14, 12, 14, 12)
+        folder_layout.setSpacing(8)
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItem("无标签模式", "unlabeled")
+        self.combo_mode.addItem("有标签模式", "labeled")
         self.edit_image_dir = QLineEdit(DEFAULT_IMAGE_DIR)
         self.edit_label_dir = QLineEdit(DEFAULT_LABEL_DIR)
         self.edit_save_dir = QLineEdit("")
+        folder_layout.addRow("筛选模式", self.combo_mode)
         folder_layout.addRow("图片输入路径", self.edit_image_dir)
         folder_layout.addRow("标签输入路径", self.edit_label_dir)
         folder_layout.addRow("保存路径", self.edit_save_dir)
@@ -357,57 +378,95 @@ class StitchPointFilterDialog(QDialog):
         row_folder2.addWidget(self.btn_load)
         left_layout.addLayout(row_folder2)
 
-        info_box = QFrame()
+        info_box = make_card()
         info_layout = QFormLayout(info_box)
+        info_layout.setContentsMargins(14, 12, 14, 12)
+        info_layout.setSpacing(8)
         self.lbl_current_name = QLabel("-")
         self.lbl_index = QLabel("0 / 0")
         self.lbl_point_count = QLabel("0")
+        self.lbl_edge_count = QLabel("0")
+        self.lbl_label_state = QLabel("无")
         self.lbl_saved_count = QLabel("0")
         self.lbl_trash_count = QLabel("0")
         info_layout.addRow("当前图片", self.lbl_current_name)
         info_layout.addRow("进度", self.lbl_index)
+        info_layout.addRow("标签状态", self.lbl_label_state)
         info_layout.addRow("点数", self.lbl_point_count)
+        info_layout.addRow("边数", self.lbl_edge_count)
         info_layout.addRow("已保存", self.lbl_saved_count)
         info_layout.addRow("已移垃圾桶", self.lbl_trash_count)
         left_layout.addWidget(info_box)
 
+        action_box = make_card()
+        action_lay = QVBoxLayout(action_box)
+        action_lay.setContentsMargins(14, 12, 14, 12)
+        action_lay.setSpacing(8)
+
         row_nav = QHBoxLayout()
+        row_nav.setSpacing(8)
         self.btn_prev = QPushButton("上一张(A)")
         self.btn_next = QPushButton("下一张(D)")
-        left_layout.addLayout(row_nav)
         row_nav.addWidget(self.btn_prev)
         row_nav.addWidget(self.btn_next)
+        action_lay.addLayout(row_nav)
 
         row_action = QHBoxLayout()
+        row_action.setSpacing(8)
         self.btn_save = QPushButton("保存当前(S)")
+        set_primary(self.btn_save)
         self.btn_trash = QPushButton("移到垃圾桶(W)")
         row_action.addWidget(self.btn_save)
         row_action.addWidget(self.btn_trash)
-        left_layout.addLayout(row_action)
+        action_lay.addLayout(row_action)
 
+        self.btn_apply_flow = QPushButton("应用筛选结果到后续流程")
+        self.btn_apply_flow.clicked.connect(self.apply_to_workflow)
+        action_lay.addWidget(self.btn_apply_flow)
+        left_layout.addWidget(action_box)
+
+        list_box = make_card()
+        list_lay = QVBoxLayout(list_box)
+        list_lay.setContentsMargins(14, 12, 14, 12)
+        list_lay.setSpacing(8)
+        list_title = QLabel("图片列表")
+        list_title.setStyleSheet("color:#111827;font-size:14px;font-weight:700;")
+        list_lay.addWidget(list_title)
         self.file_list = QListWidget()
-        left_layout.addWidget(self.file_list, 1)
+        self.file_list.setMaximumHeight(220)
+        list_lay.addWidget(self.file_list)
+        left_layout.addWidget(list_box, 1)
 
         self.lbl_help = QLabel(
             "使用方式\n"
-            "1. 选择图片输入路径、标签输入路径和保存路径\n"
-            "2. 若图片和 json 混放，标签路径可与图片路径相同\n"
-            "3. 程序按同名主文件名自动配对，只加载成对成功的数据\n"
+            "1. 先选择筛选模式，再设置图片路径、标签路径和保存路径\n"
+            "2. 无标签模式会加载全部图片；如果存在同名 json，会同时显示点和边\n"
+            "3. 有标签模式只加载能配对成功的数据，并按母标签显示点和边\n"
             "4. A/D 切图，S 移动到保存路径并切换下一张\n"
-            "5. W 移动当前图片和 json 到项目 .trash 后切换下一张"
+            "5. W 移动当前图片与同名 json 到项目 .trash 后切换下一张"
         )
         self.lbl_help.setWordWrap(True)
+        self.lbl_help.setStyleSheet("color:#6B7280;font-size:12px;")
         left_layout.addWidget(self.lbl_help)
 
         self.status_label = QLabel("请先加载数据。")
         left_layout.addWidget(self.status_label)
 
+        canvas_card = make_card()
+        canvas_lay = QVBoxLayout(canvas_card)
+        canvas_lay.setContentsMargins(14, 12, 14, 12)
+        canvas_lay.setSpacing(8)
+        canvas_title = QLabel("样本预览")
+        canvas_title.setStyleSheet("color:#111827;font-size:14px;font-weight:700;")
+        canvas_lay.addWidget(canvas_title)
         self.canvas = PointFilterCanvas()
+        canvas_lay.addWidget(self.canvas, 1)
         splitter.addWidget(left)
-        splitter.addWidget(self.canvas)
-        splitter.setSizes([430, 1170])
+        splitter.addWidget(canvas_card)
+        splitter.setSizes([400, 1180])
 
     def _connect_signals(self):
+        self.combo_mode.currentIndexChanged.connect(self._sync_mode_ui)
         self.btn_choose_image_dir.clicked.connect(self.choose_image_dir)
         self.btn_choose_label_dir.clicked.connect(self.choose_label_dir)
         self.btn_choose_save_dir.clicked.connect(self.choose_save_dir)
@@ -417,6 +476,19 @@ class StitchPointFilterDialog(QDialog):
         self.btn_save.clicked.connect(self.move_current_to_save)
         self.btn_trash.clicked.connect(self.move_current_to_trash)
         self.file_list.currentRowChanged.connect(self.jump_to_index)
+        self._sync_mode_ui()
+
+    def _current_mode(self) -> str:
+        return str(self.combo_mode.currentData() or "unlabeled")
+
+    def _sync_mode_ui(self):
+        labeled_mode = self._current_mode() == "labeled"
+        self.edit_label_dir.setEnabled(True)
+        self.btn_choose_label_dir.setEnabled(True)
+        if labeled_mode:
+            self.status_label.setText("有标签模式: 仅加载图片与同名 json 配对成功的数据。")
+        else:
+            self.status_label.setText("无标签模式: 加载全部图片；若存在同名 json，会额外显示点和边。")
 
     def choose_image_dir(self):
         path = QFileDialog.getExistingDirectory(self, "选择图片输入路径", self.edit_image_dir.text().strip())
@@ -434,6 +506,7 @@ class StitchPointFilterDialog(QDialog):
             self.edit_save_dir.setText(path)
 
     def open_dataset(self):
+        labeled_mode = self._current_mode() == "labeled"
         image_dir_text = self.edit_image_dir.text().strip()
         label_dir_text = self.edit_label_dir.text().strip() or image_dir_text
         if not image_dir_text:
@@ -444,27 +517,37 @@ class StitchPointFilterDialog(QDialog):
         if not image_dir.exists():
             QMessageBox.warning(self, "提示", "图片输入路径不存在。")
             return
-        if not label_dir.exists():
+        if labeled_mode and not label_dir.exists():
             QMessageBox.warning(self, "提示", "标签输入路径不存在。")
             return
+        if not labeled_mode and not label_dir.exists():
+            label_dir = None
 
-        self.items = collect_filter_items(image_dir, label_dir)
+        self.items = collect_filter_items(image_dir, label_dir, require_label=labeled_mode)
         self.current_index = -1
         self.current_item = None
         self.file_list.blockSignals(True)
         self.file_list.clear()
         for item in self.items:
-            QListWidgetItem(item.image_path.name, self.file_list)
+            label_suffix = "" if item.has_label else "  [无标签]"
+            QListWidgetItem(f"{item.image_path.name}{label_suffix}", self.file_list)
         self.file_list.blockSignals(False)
 
         if not self.items:
             self.lbl_current_name.setText("-")
             self.lbl_index.setText("0 / 0")
             self.lbl_point_count.setText("0")
-            self.status_label.setText("没有找到成对的图片和 json。")
+            self.lbl_edge_count.setText("0")
+            self.lbl_label_state.setText("无")
+            self.status_label.setText("没有找到符合当前模式的数据。")
             return
 
-        self.status_label.setText(f"已加载 {len(self.items)} 对数据，未配对项已自动跳过。")
+        labeled_count = sum(1 for item in self.items if item.has_label)
+        unlabeled_count = len(self.items) - labeled_count
+        if labeled_mode:
+            self.status_label.setText(f"已加载 {len(self.items)} 对有标签数据，未配对项已自动跳过。")
+        else:
+            self.status_label.setText(f"已加载 {len(self.items)} 张图片，其中 {labeled_count} 张带标签，{unlabeled_count} 张无标签。")
         self.jump_to_index(0)
 
     def jump_to_index(self, index: int):
@@ -477,7 +560,10 @@ class StitchPointFilterDialog(QDialog):
         item = self.items[index]
         try:
             image = read_image(item.image_path)
-            points = load_points_from_json(item.label_path)
+            if item.label_path is not None:
+                points, edges = load_annotation_from_json(item.label_path)
+            else:
+                points, edges = [], []
         except Exception as exc:
             QMessageBox.critical(self, "加载失败", str(exc))
             return
@@ -487,11 +573,16 @@ class StitchPointFilterDialog(QDialog):
         self.file_list.blockSignals(True)
         self.file_list.setCurrentRow(index)
         self.file_list.blockSignals(False)
-        self.canvas.set_data(image, points)
+        self.canvas.set_data(image, points, edges)
         self.lbl_current_name.setText(item.image_path.name)
         self.lbl_index.setText(f"{index + 1} / {len(self.items)}")
+        self.lbl_label_state.setText("有" if item.has_label else "无")
         self.lbl_point_count.setText(str(len(points)))
-        self.status_label.setText(f"已加载 {item.image_path.name}")
+        self.lbl_edge_count.setText(str(len(edges)))
+        self.status_label.setText(
+            f"已加载 {item.image_path.name}"
+            + (f" ，点 {len(points)} / 边 {len(edges)}" if item.has_label else " ，当前无标签")
+        )
 
     def _refresh_counts(self):
         self.lbl_saved_count.setText(str(self.saved_count))
@@ -513,8 +604,11 @@ class StitchPointFilterDialog(QDialog):
         if not self.items:
             self.lbl_current_name.setText("-")
             self.lbl_index.setText("0 / 0")
+            self.lbl_label_state.setText("无")
             self.lbl_point_count.setText("0")
+            self.lbl_edge_count.setText("0")
             self.canvas.points = []
+            self.canvas.edges = []
             self.canvas.image_bgr = None
             self.canvas.image_rgb = None
             self.canvas.image_qimage = None
@@ -540,11 +634,12 @@ class StitchPointFilterDialog(QDialog):
         if item is None:
             return
         try:
-            moved_image, moved_label = move_item_pair(item, dest_dir)
+            moved_image, moved_label = move_item_files(item, dest_dir)
         except Exception as exc:
             self.items.insert(removed_index, item)
             self.file_list.blockSignals(True)
-            self.file_list.insertItem(removed_index, item.image_path.name)
+            label_suffix = "" if item.has_label else "  [无标签]"
+            self.file_list.insertItem(removed_index, f"{item.image_path.name}{label_suffix}")
             self.file_list.blockSignals(False)
             self.current_index = -1
             QMessageBox.critical(self, "保存失败", str(exc))
@@ -552,7 +647,10 @@ class StitchPointFilterDialog(QDialog):
             return
         self.saved_count += 1
         self._refresh_counts()
-        self._show_after_removal(removed_index, f"已移动到保存路径: {moved_image.name}, {moved_label.name}")
+        moved_parts = [moved_image.name]
+        if moved_label is not None:
+            moved_parts.append(moved_label.name)
+        self._show_after_removal(removed_index, f"已移动到保存路径: {', '.join(moved_parts)}")
 
     def _get_trash_dir(self) -> Path:
         if self.trash_dir is None:
@@ -565,11 +663,12 @@ class StitchPointFilterDialog(QDialog):
             return
         trash_dir = self._get_trash_dir()
         try:
-            moved_image, moved_label = move_item_pair(item, trash_dir)
+            moved_image, moved_label = move_item_files(item, trash_dir)
         except Exception as exc:
             self.items.insert(removed_index, item)
             self.file_list.blockSignals(True)
-            self.file_list.insertItem(removed_index, item.image_path.name)
+            label_suffix = "" if item.has_label else "  [无标签]"
+            self.file_list.insertItem(removed_index, f"{item.image_path.name}{label_suffix}")
             self.file_list.blockSignals(False)
             self.current_index = -1
             QMessageBox.critical(self, "移动失败", str(exc))
@@ -577,7 +676,18 @@ class StitchPointFilterDialog(QDialog):
             return
         self.trash_count += 1
         self._refresh_counts()
-        self._show_after_removal(removed_index, f"已移到垃圾桶: {moved_image.name}, {moved_label.name}")
+        moved_parts = [moved_image.name]
+        if moved_label is not None:
+            moved_parts.append(moved_label.name)
+        self._show_after_removal(removed_index, f"已移到垃圾桶: {', '.join(moved_parts)}")
+
+    def apply_to_workflow(self):
+        dest_dir = self._validate_save_dir()
+        if dest_dir is None:
+            return
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        self.applyRequested.emit(str(dest_dir))
+        self.status_label.setText(f"已应用到后续流程：{dest_dir}")
 
     def keyPressEvent(self, event):
         focused = QApplication.focusWidget()

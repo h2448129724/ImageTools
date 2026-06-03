@@ -9,8 +9,8 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
+from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -30,9 +30,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from gui.autosave import AutoSaveStatusController
+from core.cabf_shared import MASTER_SCHEMA_VERSION, make_empty_master_annotation, normalize_points_for_editor, write_json
 
 
-DEFAULT_COSMOS_ROOT = Path(r"D:\project\changrui\cosmos")
+DEFAULT_COSMOS_ROOT = Path("")
 DEFAULT_DETECTOR_SCRIPT = DEFAULT_COSMOS_ROOT / "algo" / "cab_f" / "sew_point_detector.py"
 DEFAULT_MODEL_PATH = DEFAULT_COSMOS_ROOT / "assets" / "weights" / "cab_f" / "sew_point_detector.onnx"
 
@@ -43,27 +44,6 @@ def read_image(image_path) -> np.ndarray:
     if image is None:
         raise FileNotFoundError(f"无法读取图片: {image_path}")
     return image
-
-
-def save_annotation_json(path, annotation: dict):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(annotation, f, ensure_ascii=False, indent=2)
-
-
-def make_empty_annotation(image_path: str, width: int, height: int, sample_id: str):
-    return {
-        "schema_version": "1.0",
-        "sample_id": sample_id,
-        "image_path": image_path,
-        "image_size": {"width": int(width), "height": int(height)},
-        "roi": None,
-        "spacing_hint": None,
-        "points": [],
-        "segments": [],
-        "metadata": {},
-    }
 
 
 class DetectorRunner:
@@ -117,7 +97,7 @@ class PointCanvas(QWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setMinimumSize(640, 480)
+        self.setMinimumSize(520, 380)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.image_bgr: Optional[np.ndarray] = None
@@ -152,16 +132,7 @@ class PointCanvas(QWidget):
         self.pointCountChanged.emit(len(self.points))
 
     def set_points(self, points: list[dict]):
-        self.points = [
-            {
-                "id": int(point["id"]),
-                "x": float(point["x"]),
-                "y": float(point["y"]),
-                "score": float(point.get("score", 1.0)),
-                "source": point.get("source", "manual"),
-            }
-            for point in points
-        ]
+        self.points = normalize_points_for_editor(points)
         self.selected_point_id = None
         self.pointCountChanged.emit(len(self.points))
         self.update()
@@ -232,7 +203,8 @@ class PointCanvas(QWidget):
         painter.fillRect(self.rect(), QColor("#111111"))
 
         if self.image_qimage is None:
-            painter.setPen(QColor("#ffffff"))
+            painter.setPen(QColor("#9CA3AF"))
+            painter.setFont(QFont("", 14))
             painter.drawText(self.rect(), Qt.AlignCenter, "请先选择图片")
             return
 
@@ -368,7 +340,9 @@ class StitchPointEditorDialog(QDialog):
     def __init__(self, parent=None, image: Optional[np.ndarray] = None, image_path: str = ""):
         super().__init__(parent)
         self.setWindowTitle("CAB-F 针点编辑器")
-        self.resize(1500, 920)
+        self.resize(1420, 880)
+        self._left_panel_visible = True
+        self._left_panel_width = 340
         self.detector_runner = DetectorRunner()
         self.image_bgr: Optional[np.ndarray] = None
         self.image_path = image_path
@@ -382,13 +356,26 @@ class StitchPointEditorDialog(QDialog):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Horizontal)
-        root.addWidget(splitter)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
-        left = QWidget()
-        left.setMinimumWidth(360)
-        left.setMaximumWidth(460)
-        left_layout = QVBoxLayout(left)
+        topbar = QHBoxLayout()
+        topbar.setSpacing(8)
+        self.btn_toggle_sidebar = QPushButton("收起侧栏")
+        self.btn_toggle_sidebar.clicked.connect(self._toggle_left_panel)
+        topbar.addWidget(self.btn_toggle_sidebar)
+        topbar.addStretch(1)
+        root.addLayout(topbar)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        root.addWidget(self.splitter)
+
+        self.left_panel = QWidget()
+        self.left_panel.setMinimumWidth(260)
+        self.left_panel.setMaximumWidth(380)
+        left_layout = QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
 
         form_box = QFrame()
         form_layout = QFormLayout(form_box)
@@ -411,6 +398,7 @@ class StitchPointEditorDialog(QDialog):
         left_layout.addWidget(form_box)
 
         row1 = QHBoxLayout()
+        row1.setSpacing(8)
         self.btn_choose_image = QPushButton("选择图片")
         self.btn_use_current = QPushButton("使用当前图")
         self.btn_choose_script = QPushButton("选择脚本")
@@ -420,6 +408,7 @@ class StitchPointEditorDialog(QDialog):
         left_layout.addLayout(row1)
 
         row2 = QHBoxLayout()
+        row2.setSpacing(8)
         self.btn_choose_model = QPushButton("选择模型")
         self.btn_detect = QPushButton("模型出点")
         self.btn_clear = QPushButton("清空点")
@@ -429,6 +418,7 @@ class StitchPointEditorDialog(QDialog):
         left_layout.addLayout(row2)
 
         row3 = QHBoxLayout()
+        row3.setSpacing(8)
         self.btn_choose_output = QPushButton("选择输出")
         self.btn_save = QPushButton("保存JSON")
         row3.addWidget(self.btn_choose_output)
@@ -463,15 +453,11 @@ class StitchPointEditorDialog(QDialog):
         left_layout.addWidget(info_box)
 
         self.lbl_help = QLabel(
-            "操作说明\n"
-            "- 选择图片后点“模型出点”\n"
-            "- 模式切到“新增”可补点\n"
-            "- 模式切到“移动”后拖拽点\n"
-            "- 模式切到“删除”后点击误检点\n"
-            "- 鼠标滚轮缩放，右键拖拽平移\n"
-            "- 保存 JSON 后可继续接 GNN 标注流程"
+            "快捷说明\n"
+            "新增补点 / 移动拖拽 / 删除误检 / 滚轮缩放 / 右键平移 / 保存后继续流程"
         )
         self.lbl_help.setWordWrap(True)
+        self.lbl_help.setStyleSheet("color:#6B7280;font-size:12px;")
         left_layout.addWidget(self.lbl_help)
         left_layout.addStretch(1)
 
@@ -481,9 +467,9 @@ class StitchPointEditorDialog(QDialog):
         left_layout.addWidget(self.save_status_label)
 
         self.canvas = PointCanvas()
-        splitter.addWidget(left)
-        splitter.addWidget(self.canvas)
-        splitter.setSizes([400, 1100])
+        self.splitter.addWidget(self.left_panel)
+        self.splitter.addWidget(self.canvas)
+        self.splitter.setSizes([340, 1080])
         self.save_state = AutoSaveStatusController(self.save_status_label, self.btn_save)
 
     def _connect_signals(self):
@@ -499,6 +485,20 @@ class StitchPointEditorDialog(QDialog):
         self.canvas.pointCountChanged.connect(lambda count: self.lbl_point_count.setText(str(count)))
         self.canvas.statusMessage.connect(self.status_label.setText)
         self.canvas.annotationModified.connect(self._on_annotation_modified)
+
+    def _toggle_left_panel(self):
+        if self._left_panel_visible:
+            self._left_panel_width = max(self.splitter.sizes()[0], 260)
+            self.left_panel.hide()
+            self.splitter.setSizes([0, 1])
+            self.btn_toggle_sidebar.setText("展开侧栏")
+            self._left_panel_visible = False
+            return
+
+        self.left_panel.show()
+        self.splitter.setSizes([self._left_panel_width, max(self.width() - self._left_panel_width, 1)])
+        self.btn_toggle_sidebar.setText("收起侧栏")
+        self._left_panel_visible = True
 
     def _set_mode(self, mode: str):
         for action, action_mode in self.action_group:
@@ -589,25 +589,47 @@ class StitchPointEditorDialog(QDialog):
 
         self.status_label.setText("模型推理中，请稍候...")
         self.btn_detect.setEnabled(False)
-        try:
-            points = self.detector_runner.detect(
-                self.image_bgr,
-                detector_script_path=detector_script,
-                model_path=model_path,
-                conf=self.spin_conf.value(),
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "模型出点失败", str(exc))
-            self.status_label.setText("模型出点失败。")
-            self.btn_detect.setEnabled(True)
-            return
 
+        image_bgr = self.image_bgr
+        conf = self.spin_conf.value()
+        runner = self.detector_runner
+
+        class _DetectWorker(QThread):
+            done = Signal(object)
+            error = Signal(str)
+
+            def __init__(self, img, ds, mp, c):
+                super().__init__()
+                self._img = img
+                self._ds = ds
+                self._mp = mp
+                self._c = c
+
+            def run(self):
+                try:
+                    pts = runner.detect(self._img, detector_script_path=self._ds,
+                                        model_path=self._mp, conf=self._c)
+                    self.done.emit(pts)
+                except Exception as exc:
+                    self.error.emit(str(exc))
+
+        self._detect_worker = _DetectWorker(image_bgr, detector_script, model_path, conf)
+        self._detect_worker.done.connect(self._on_detect_done)
+        self._detect_worker.error.connect(self._on_detect_error)
+        self._detect_worker.start()
+
+    def _on_detect_done(self, points):
         self.canvas.set_points(points)
         self.status_label.setText(f"模型出点完成，共 {len(points)} 个点。")
         self.btn_detect.setEnabled(True)
         self._has_unsaved_changes = True
         self.save_state.mark_dirty("未保存修改")
         self._auto_save_annotation()
+
+    def _on_detect_error(self, msg):
+        QMessageBox.critical(self, "模型出点失败", msg)
+        self.status_label.setText("模型出点失败。")
+        self.btn_detect.setEnabled(True)
 
     def _on_point_selection_changed(self, point):
         if point is None:
@@ -633,7 +655,7 @@ class StitchPointEditorDialog(QDialog):
             return False
 
         sample_id = Path(output_path).stem
-        annotation = make_empty_annotation(
+        annotation = make_empty_master_annotation(
             image_path=self.edit_image.text().strip(),
             width=int(self.image_bgr.shape[1]),
             height=int(self.image_bgr.shape[0]),
@@ -659,7 +681,7 @@ class StitchPointEditorDialog(QDialog):
         }
         self.save_state.mark_saving(auto=silent)
         try:
-            save_annotation_json(output_path, annotation)
+            write_json(output_path, annotation)
         except Exception as exc:
             self.save_state.mark_error(f"保存失败：{exc}")
             if not silent:

@@ -7,12 +7,18 @@ from gui.project_tools.models import RegisteredProject, RegisteredProjectTool
 PROJECT = RegisteredProject(
     key="cabf",
     menu_title="CAB-F",
-    display_name="CAB-F",
+    display_name="CAB-F 缝纫点与连边标注数据处理",
     tools=(
         RegisteredProjectTool(
             key="cabf_stitch_editor",
             title="连边标注器",
             description="编辑 CAB-F 图像中的缝纫点与连边关系。若当前主界面已经加载图片，会自动把当前图片带入编辑器。",
+            launcher_name="_show_stitch_graph_editor",
+        ),
+        RegisteredProjectTool(
+            key="cabf_point_editor",
+            title="缝纫点编辑器",
+            description="编辑和修正 CAB-F 缝纫点标注，支持模型辅助预标注。",
             launcher_name="_show_stitch_point_editor",
         ),
         RegisteredProjectTool(

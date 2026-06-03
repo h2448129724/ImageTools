@@ -31,6 +31,8 @@ Thumbs.db
 
 # Claude
 .claude/
+.codex/
+.agents/
 
 # PyInstaller
 *.spec
@@ -43,8 +45,17 @@ htmlcov/
 
 # Local trash and generated review outputs
 .trash/
+tmp_*.png
+*.log
+
+# Python runtime caches
+__pycache__/
+**/__pycache__/
 
 # CAB-F local smoke / dataset artifacts
 # Keep these files on disk, but never track them in Git.
 /_cabf_smoke/
 /_cabf_smoke/**
+
+# CAB-F local pipeline logs
+/project_modules/cabf_pipeline/logs/

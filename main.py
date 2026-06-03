@@ -1,14 +1,28 @@
-"""Entry point for the image processing toolbox."""
+"""CAB-F工具 — 入口。"""
+import os
 import sys
 import logging
 from PySide6.QtWidgets import QApplication
-from gui.main_window import MainWindow
+from PySide6.QtGui import QFont, QFontDatabase
+from gui.main_window import MainWindow, STYLESHEET
 
 
 def main():
-    logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    log_level = os.environ.get("CABF_LOG_LEVEL", "WARNING").upper()
+    logging.basicConfig(level=getattr(logging, log_level, logging.WARNING),
+                        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    families = set(QFontDatabase().families())
+    font_family = ""
+    for candidate in ("Microsoft YaHei UI", "Segoe UI", "Microsoft YaHei"):
+        if candidate in families:
+            font_family = candidate
+            break
+    app_font = QFont(font_family, 10) if font_family else QFont()
+    app_font.setPointSize(10)
+    app.setFont(app_font)
+    app.setStyleSheet(STYLESHEET)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
